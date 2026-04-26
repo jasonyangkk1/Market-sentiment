@@ -202,19 +202,19 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex items-center gap-4 w-full md:w-auto">
+          <div className="flex flex-col sm:flex-row items-center gap-4 w-full md:w-auto">
             {/* Tab Navigation */}
-            <nav className="flex bg-[#161B22] p-1 rounded-lg border border-white/5">
+            <nav className="flex bg-[#161B22] p-1 rounded-lg border border-white/5 w-full sm:w-auto">
               <button 
                 onClick={() => setActiveTab('analysis')}
-                className={`flex items-center gap-2 px-4 py-2 rounded-md text-xs font-bold transition-all ${activeTab === 'analysis' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' : 'text-slate-500 hover:text-slate-300'}`}
+                className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-2 rounded-md text-xs font-bold transition-all ${activeTab === 'analysis' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' : 'text-slate-500 hover:text-slate-300'}`}
               >
                 <LayoutDashboard size={14} />
                 分析面板
               </button>
               <button 
                 onClick={() => setActiveTab('history')}
-                className={`flex items-center gap-2 px-4 py-2 rounded-md text-xs font-bold transition-all ${activeTab === 'history' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' : 'text-slate-500 hover:text-slate-300'}`}
+                className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-2 rounded-md text-xs font-bold transition-all ${activeTab === 'history' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' : 'text-slate-500 hover:text-slate-300'}`}
               >
                 <HistoryIcon size={14} />
                 歷史紀錄
@@ -223,34 +223,37 @@ export default function App() {
 
             <div className="h-6 w-[1px] bg-white/10 hidden md:block" />
 
-            <form onSubmit={(e) => handleSearch(e)} className="relative flex-1 md:w-48 group">
-              <input
-                type="text"
-                placeholder="代碼 (EX: 2330)"
-                value={symbol}
-                onChange={(e) => setSymbol(e.target.value)}
-                className="w-full bg-[#161B22] border border-white/10 rounded-lg py-2.5 pl-11 pr-4 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500/50 transition-all placeholder:text-slate-600 text-white"
-              />
-              <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-blue-500 transition-colors" size={18} />
-              <button 
-                type="submit"
-                disabled={loading}
-                className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-md hover:bg-white/5 text-slate-500 disabled:opacity-50"
-              >
-                {loading ? <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" /> : <ChevronRight size={18} />}
-              </button>
-            </form>
+            <div className="flex items-center gap-2 w-full md:w-auto">
+              <form onSubmit={(e) => handleSearch(e)} className="relative flex-1 sm:w-48 group">
+                <input
+                  type="text"
+                  placeholder="代碼 (EX: 2330)"
+                  inputMode="numeric"
+                  value={symbol}
+                  onChange={(e) => setSymbol(e.target.value)}
+                  className="w-full bg-[#161B22] border border-white/10 rounded-lg py-3 sm:py-2.5 pl-11 pr-12 text-base sm:text-sm focus:outline-none focus:ring-1 focus:ring-blue-500/50 transition-all placeholder:text-slate-600 text-white"
+                />
+                <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-blue-500 transition-colors" size={18} />
+                <button 
+                  type="submit"
+                  disabled={loading}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-md bg-blue-600/10 text-blue-500 hover:bg-blue-600/20 disabled:opacity-50 transition-colors"
+                >
+                  {loading ? <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" /> : <ChevronRight size={20} />}
+                </button>
+              </form>
 
-            <button 
-              onClick={() => {
-                setTempToken(finmindToken);
-                setShowTokenModal(true);
-              }}
-              className={`p-2.5 bg-[#161B22] border rounded-lg transition-all ${finmindToken ? "text-blue-500 border-blue-500/30" : "text-slate-500 border-white/5 hover:text-blue-500"}`}
-              title="API 設定"
-            >
-              <Zap size={20} />
-            </button>
+              <button 
+                onClick={() => {
+                  setTempToken(finmindToken);
+                  setShowTokenModal(true);
+                }}
+                className={`p-3 sm:p-2.5 bg-[#161B22] border rounded-lg transition-all ${finmindToken ? "text-blue-500 border-blue-500/30" : "text-slate-500 border-white/5 hover:text-blue-500"}`}
+                title="API 設定"
+              >
+                <Zap size={20} />
+              </button>
+            </div>
           </div>
         </div>
       </header>
