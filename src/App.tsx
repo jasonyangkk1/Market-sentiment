@@ -7,6 +7,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { AlertCircle, ChevronRight, Search, Zap, BarChart3, Info, History as HistoryIcon, LayoutDashboard, Trash2 } from "lucide-react";
 import { useState, useEffect, type FormEvent, type MouseEvent } from "react";
 import { analyzeStock, AnalysisResult } from "./services/geminiService";
+import { fetchAllStockData } from "./services/twseService";
 
 const HISTORY_STORAGE_KEY = "gemini_stock_analysis_history";
 const MAX_HISTORY_ITEMS = 20;
@@ -65,6 +66,9 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'analysis' | 'history'>('analysis');
   const [symbol, setSymbol] = useState("");
   const [loading, setLoading] = useState(false);
+  const [finmindToken, setFinmindToken] = useState<string>(() => localStorage.getItem("finmind_token") || "");
+  const [showTokenModal, setShowTokenModal] = useState(false);
+  const [tempToken, setTempToken] = useState("");
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
@@ -93,13 +97,19 @@ export default function App() {
     const targetSymbol = searchSymbol || symbol.trim();
     if (!targetSymbol) return;
 
+    if (!finmindToken && !import.meta.env.VITE_FINMIND_TOKEN) {
+      setShowTokenModal(true);
+      return;
+    }
+
     setLoading(true);
     setError(null);
     setActiveTab('analysis');
     try {
-      const data = await analyzeStock(targetSymbol);
-      setResult(data);
-      saveToHistory(data);
+      const stockData = await fetchAllStockData(targetSymbol);
+      const analysisData = await analyzeStock(stockData);
+      setResult(analysisData);
+      saveToHistory(analysisData);
     } catch (err) {
       setError(err instanceof Error ? err.message : "發生未知錯誤");
     } finally {
@@ -114,6 +124,16 @@ export default function App() {
     localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(updated));
   };
 
+  const saveToken = () => {
+    const trimmed = tempToken.trim();
+    if (trimmed) {
+      localStorage.setItem("finmind_token", trimmed);
+      setFinmindToken(trimmed);
+      setShowTokenModal(false);
+      setTempToken("");
+    }
+  };
+
   const clearHistory = () => {
     setHistory([]);
     localStorage.removeItem(HISTORY_STORAGE_KEY);
@@ -121,6 +141,52 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#0A0C10] text-[#E2E8F0] font-sans">
+      {/* Token Modal */}
+      <AnimatePresence>
+        {showTokenModal && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 backdrop-blur-md bg-black/60">
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-[#161B22] border border-white/10 rounded-2xl p-8 max-w-md w-full shadow-2xl relative"
+            >
+              <button 
+                onClick={() => setShowTokenModal(false)}
+                className="absolute right-6 top-6 text-slate-500 hover:text-ash-400 p-1"
+              >
+                <Trash2 size={18} className="rotate-45" /> 
+              </button>
+              <div className="w-12 h-12 bg-blue-600/20 rounded-xl flex items-center justify-center mb-6">
+                <Zap className="text-blue-500" size={24} />
+              </div>
+              <h3 className="text-xl font-bold text-white mb-2">設定 FinMind API Token</h3>
+              <p className="text-slate-400 text-sm mb-6 leading-relaxed">
+                台股數據抓取需要 FinMind Token。請先至 <a href="https://finmindtrade.com" target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">finmindtrade.com</a> 免費註冊並取得 Token。
+              </p>
+              <div className="space-y-4">
+                <div className="space-y-1.5">
+                  <label className="text-[10px] uppercase tracking-widest text-slate-500 font-bold">Your API Token</label>
+                  <input 
+                    type="password"
+                    placeholder="在此貼入您的 Token"
+                    value={tempToken}
+                    onChange={(e) => setTempToken(e.target.value)}
+                    className="w-full bg-[#0A0C10] border border-white/10 rounded-lg py-3 px-4 text-sm focus:ring-2 focus:ring-blue-500/50 outline-none transition-all placeholder:text-slate-700"
+                  />
+                </div>
+                <button 
+                  onClick={saveToken}
+                  className="w-full py-3 rounded-lg bg-blue-600 text-white font-bold hover:bg-blue-500 transition-colors shadow-lg shadow-blue-600/20 text-sm mt-2"
+                >
+                  儲存並啟用
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Header */}
       <header className="border-b border-white/10 px-6 py-6 bg-[#0A0C10] sticky top-0 z-50 backdrop-blur-md bg-opacity-90">
         <div className="max-w-6xl mx-auto flex flex-col md:flex-row justify-between items-center gap-6">
@@ -131,15 +197,12 @@ export default function App() {
             <div>
               <h1 className="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
                 Gemini 籌碼分析儀
-                <span className="text-[10px] font-mono text-blue-400 border border-blue-400/30 px-2 py-0.5 rounded">
-                  MODEL: 3-FLASH
-                </span>
               </h1>
               <p className="text-slate-400 text-sm italic">全方位主力與散戶動態監測系統</p>
             </div>
           </div>
 
-          <div className="flex items-center gap-6 w-full md:w-auto">
+          <div className="flex items-center gap-4 w-full md:w-auto">
             {/* Tab Navigation */}
             <nav className="flex bg-[#161B22] p-1 rounded-lg border border-white/5">
               <button 
@@ -158,14 +221,15 @@ export default function App() {
               </button>
             </nav>
 
-            <form onSubmit={(e) => handleSearch(e)} className="relative flex-1 md:w-64 group">
+            <div className="h-6 w-[1px] bg-white/10 hidden md:block" />
+
+            <form onSubmit={(e) => handleSearch(e)} className="relative flex-1 md:w-48 group">
               <input
                 type="text"
-                placeholder="輸入股票代碼 (EX: 2330)"
+                placeholder="代碼 (EX: 2330)"
                 value={symbol}
                 onChange={(e) => setSymbol(e.target.value)}
                 className="w-full bg-[#161B22] border border-white/10 rounded-lg py-2.5 pl-11 pr-4 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500/50 transition-all placeholder:text-slate-600 text-white"
-                id="stock-search-input"
               />
               <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-blue-500 transition-colors" size={18} />
               <button 
@@ -176,6 +240,17 @@ export default function App() {
                 {loading ? <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" /> : <ChevronRight size={18} />}
               </button>
             </form>
+
+            <button 
+              onClick={() => {
+                setTempToken(finmindToken);
+                setShowTokenModal(true);
+              }}
+              className={`p-2.5 bg-[#161B22] border rounded-lg transition-all ${finmindToken ? "text-blue-500 border-blue-500/30" : "text-slate-500 border-white/5 hover:text-blue-500"}`}
+              title="API 設定"
+            >
+              <Zap size={20} />
+            </button>
           </div>
         </div>
       </header>
@@ -214,8 +289,8 @@ export default function App() {
                     <div className="absolute inset-0 border-2 border-t-blue-500 rounded-full animate-spin"></div>
                     <div className="absolute inset-4 border border-blue-400/20 rounded-full animate-pulse"></div>
                   </div>
-                  <p className="text-blue-400 font-medium tracking-wide">Gemini 正在極速掃描市場深度數據...</p>
-                  <p className="text-slate-500 text-xs mt-3 uppercase tracking-widest font-mono">Analyzing Market Breadth & Insider Shadow</p>
+                  <p className="text-blue-400 font-medium tracking-wide">正在定位最近有效交易日並抓取數據...</p>
+                  <p className="text-slate-500 text-xs mt-3 uppercase tracking-widest font-mono">Scanning Market Breadth & Insider Shadow</p>
                 </div>
               )}
 
@@ -244,7 +319,15 @@ export default function App() {
                     >
                       <div className="space-y-8">
                         <div>
-                          <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-widest mb-4">Gemini 終極判斷</h2>
+                          <div className="flex justify-between items-start mb-4">
+                            <div className="space-y-1">
+                              <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-widest">Gemini 終極判斷</h2>
+                              <p className="text-[10px] text-slate-600 font-medium">資料來源：TWSE OpenAPI & FinMind (混合 API)</p>
+                            </div>
+                            <span className="text-[10px] font-mono bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2 py-0.5 rounded shadow-[0_0_10px_rgba(59,130,246,0.1)]">
+                              TRADING DATE: {result.tradingDate}
+                            </span>
+                          </div>
                           <div className="flex items-center gap-3 mb-4">
                             <span className="text-2xl font-black text-white">{result.symbol}</span>
                             <div className={`inline-flex items-center px-4 py-1.5 rounded-full font-black text-lg border ${
