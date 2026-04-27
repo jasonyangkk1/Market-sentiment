@@ -13,6 +13,54 @@ async function startServer() {
 
   app.use(express.json());
 
+  // Yahoo Finance Proxy
+  app.get("/api/yahoo/*", async (req, res) => {
+    try {
+      const yahooPath = req.params[0];
+      const query = new URLSearchParams(req.query as any).toString();
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooPath}?${query}`;
+      
+      console.log(`[PROXY] Fetching Yahoo: ${url}`);
+      
+      const response = await axios({
+        method: "get",
+        url: url,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        },
+        timeout: 10000 
+      });
+      res.json(response.data);
+    } catch (error: any) {
+      console.error("[PROXY] Yahoo Error:", error.message);
+      res.status(error.response?.status || 500).json({ error: error.message });
+    }
+  });
+
+  // TPEx Proxy Routes
+  app.get("/api/tpex/*", async (req, res) => {
+    try {
+      const tpexPath = req.params[0];
+      const query = new URLSearchParams(req.query as any).toString();
+      const url = `https://www.tpex.org.tw/${tpexPath}?${query}`;
+      
+      console.log(`[PROXY] Fetching TPEx: ${url}`);
+      
+      const response = await axios({
+        method: "get",
+        url: url,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        },
+        timeout: 10000 
+      });
+      res.json(response.data);
+    } catch (error: any) {
+      console.error("[PROXY] TPEx Error:", error.message);
+      res.status(error.response?.status || 500).json({ error: error.message });
+    }
+  });
+
   // TWSE Proxy Routes
   app.get("/api/twse/*", async (req, res) => {
     try {

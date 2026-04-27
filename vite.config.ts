@@ -23,7 +23,17 @@ export default defineConfig(({mode}) => {
           target: 'https://www.twse.com.tw',
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/api\/twse/, ''),
-        }
+        },
+        '/api/tpex': {
+          target: 'https://www.tpex.org.tw',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/api\/tpex/, ''),
+        },
+        '/api/yahoo': {
+          target: 'https://query1.finance.yahoo.com/v8/finance/chart',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/api\/yahoo/, ''),
+        },
       },
       hmr: process.env.DISABLE_HMR !== 'true',
     },

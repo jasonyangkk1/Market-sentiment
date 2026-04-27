@@ -407,7 +407,8 @@ export default function App() {
                       title="關鍵分點追蹤" 
                       statusLabel="INSIDER SHADOW"
                       statusType={result.scores.insiderShadow > 0 ? "success" : "danger"}
-                      content={result.indicators.insiderShadow} 
+                      badge={result.raw?.institutionDate && result.raw?.institutionDate !== result.tradingDate ? `⚠️ 延遲至 ${result.raw.institutionDate}` : undefined}
+                      content={(result.raw?.institutionDate && result.raw?.institutionDate !== result.tradingDate ? `⚠️ 注意：當日法人資料尚未發布，此為 ${result.raw.institutionDate} 數據。\n\n` : "") + result.indicators.insiderShadow} 
                       delay={0.5}
                     />
                     <IndicatorCard 

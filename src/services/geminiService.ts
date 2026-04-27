@@ -128,47 +128,19 @@ export async function analyzeStock(data: StockData): Promise<AnalysisResult> {
   }
 }
 
-export async function fetchMissingDataViaGemini(
-  symbol: string,
+export async function fetchMarketBreadthViaGemini(
   date: string
-): Promise<{
-  foreign: number; trust: number; dealer: number; instTotal: number;
-  marginBalance: number; marginChange: number;
-  advance: number; decline: number;
-  note: string;
-  source?: string;
-}> {
-  const fallback = {
-    foreign: 0, trust: 0, dealer: 0, instTotal: 0,
-    marginBalance: 0, marginChange: 0,
-    advance: 0, decline: 0,
-    note: "搜尋失敗，使用預設值"
-  };
+): Promise<{ advance: number; decline: number; note: string }> {
+  const fallback = { advance: 0, decline: 0, note: "搜尋失敗，使用預設值" };
 
   const prompt = `你是台股資料擷取助理。請用 Google 搜尋以下資料，日期為 ${date}（若當日無資料請找最近一個交易日）。
 
-需要搜尋的股票代號：${symbol}
-
-【搜尋任務一】${symbol} 三大法人買賣超
-搜尋建議：「${symbol} ${date} 三大法人」或「${symbol} 法人買賣超」
-來源建議：goodinfo.tw、cnyes.com、cmoney.tw、mops.twse.com.tw
-
-【搜尋任務二】${symbol} 融資餘額
-搜尋建議：「${symbol} ${date} 融資餘額」
-來源建議：goodinfo.tw、富邦、永豐
-
-【搜尋任務三】台股大盤 ${date} 上漲家數與下跌家數
+【搜尋任務】台股大盤 ${date} 上漲家數與下跌家數
 搜尋建議：「台股 ${date} 上漲家數 下跌家數」或「台股今日漲跌家數」
 來源建議：twse.com.tw、cnyes.com、商業週刊股市
 
-完成所有搜尋後，只回傳以下 JSON，數字全部用整數（張數），沒有找到的欄位填 0：
+完成搜尋後，只回傳以下 JSON，數字全部用整數，沒有找到的欄位填 0：
 {
-  "foreign": 外資買賣超張數,
-  "trust": 投信買賣超張數,
-  "dealer": 自營商買賣超張數,
-  "instTotal": 三大法人合計張數,
-  "marginBalance": 融資今日餘額張數,
-  "marginChange": 融資增減張數（今日減昨日，增加為正）,
   "advance": 大盤今日上漲家數,
   "decline": 大盤今日下跌家數,
   "note": "說明找到哪些資料、來源為何"

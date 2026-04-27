@@ -1,4 +1,4 @@
-import { AnalysisResult, fetchMissingDataViaGemini } from "./geminiService";
+import { AnalysisResult, fetchMarketBreadthViaGemini } from "./geminiService";
 
 export interface StockData {
   symbol: string;
@@ -8,7 +8,7 @@ export interface StockData {
   changePercent: number;
   volume: number;
   avgVolume5D: number;
-  turnoverRatio: number; // 週轉率
+  turnoverRatio: number; 
   institutions: {
     foreign: number;
     trust: number;
@@ -24,37 +24,206 @@ export interface StockData {
     decline: number;
     ratio: number;
   };
-  raw: any; // 保存原始數據包供 Gemini 參考
+  raw: any; 
 }
 
-const FINMIND_BASE = "https://api.finmindtrade.com/api/v4/data";
+const safeNum = (v: any) => {
+  if (v === undefined || v === null) return 0;
+  const n = Number(String(v).replace(/,/g, ''));
+  return isNaN(n) ? 0 : n;
+};
 
-function getYYYY_MM_DD(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
+function getYYYMMDD(date: Date): string {
+  const twDate = new Date(date.getTime() + 8 * 3600 * 1000);
+  const y = twDate.getUTCFullYear();
+  const m = String(twDate.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(twDate.getUTCDate()).padStart(2, "0");
+  return `${y}${m}${d}`;
 }
 
-function getFinMindToken(): string {
-  return localStorage.getItem("finmind_token") || (import.meta.env.VITE_FINMIND_TOKEN as string) || "";
+function getROCDate(date: Date): string {
+  const twDate = new Date(date.getTime() + 8 * 3600 * 1000);
+  const y = twDate.getUTCFullYear() - 1911;
+  const m = String(twDate.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(twDate.getUTCDate()).padStart(2, "0");
+  return `${y}/${m}/${d}`;
 }
 
-async function fetchFinMind(params: Record<string, string>) {
-  const token = getFinMindToken();
-  const query = new URLSearchParams({ ...params, token }).toString();
-  const url = `${FINMIND_BASE}?${query}`;
+function getLatestTradingDate(date: Date): string {
+  const twTime = date.getTime() + 8 * 3600 * 1000;
+  const twDate = new Date(twTime);
+  const day = twDate.getUTCDay();
   
+  let offset = 0;
+  if (day === 0) offset = 2; // Sunday -> Friday
+  else if (day === 6) offset = 1; // Saturday -> Friday
+  
+  const adjusted = new Date(twTime - offset * 86400000);
+  return adjusted.toISOString().split('T')[0];
+}
+
+function getPrevTradingDay(dateStr: string): string {
+  const d = new Date(dateStr);
+  d.setUTCDate(d.getUTCDate() - 1);
+  // Skip Sunday (0) and Saturday (6)
+  while (d.getUTCDay() === 0 || d.getUTCDay() === 6) {
+    d.setUTCDate(d.getUTCDate() - 1);
+  }
+  return d.toISOString().split('T')[0];
+}
+
+async function fetchYahooPrice(symbol: string) {
+  const suffixes = [".TW", ".TWO"];
+  for (const suffix of suffixes) {
+    try {
+      const url = `/api/yahoo/${symbol}${suffix}?interval=1d&range=1mo`;
+      const res = await fetch(url);
+      const json = await res.json();
+      if (!json.chart?.result?.[0]) continue;
+
+      const result = json.chart.result[0];
+      const indicators = result.indicators.quote[0];
+      const timestamps = result.timestamp;
+      
+      const closes = indicators.close || [];
+      const volumes = indicators.volume || [];
+      const opens = indicators.open || [];
+      
+      // Get valid data (filter nulls)
+      const validIndices = closes.map((c: any, i: number) => c !== null ? i : -1).filter((i: number) => i !== -1);
+      
+      if (validIndices.length === 0) continue;
+
+      const latestIdx = validIndices[validIndices.length - 1];
+      const close = closes[latestIdx];
+      const open = opens[latestIdx];
+      const volume = volumes[latestIdx];
+      const change = close - opens[latestIdx]; // Approx change from open if no prev close
+      
+      // More accurate change if enough data
+      let prevClose = close;
+      if (validIndices.length > 1) {
+        prevClose = closes[validIndices[validIndices.length - 2]];
+      }
+      
+      const actualChange = close - prevClose;
+      const changePercent = (actualChange / prevClose) * 100;
+      
+      // Last 5 days volume
+      const last5Volumes = validIndices.slice(-5).map(i => volumes[i]);
+      const avgVol5D = last5Volumes.reduce((a, b) => a + b, 0) / last5Volumes.length;
+
+      return {
+        symbol: `${symbol}${suffix}`,
+        close,
+        change: actualChange,
+        changePercent,
+        volume,
+        avgVol5D,
+        date: new Date(timestamps[latestIdx] * 1000 + 8 * 3600 * 1000).toISOString().split('T')[0],
+        suffix
+      };
+    } catch (e) {
+      console.warn(`Yahoo fetch failed for ${symbol}${suffix}`, e);
+    }
+  }
+  return null;
+}
+
+async function fetchInstitutionalData(symbol: string, date: string, suffix: string) {
+  try {
+    if (suffix === ".TW") {
+      const url = `/api/twse/fund/T86?response=json&date=${date.replace(/-/g, '')}&selectType=ALLBUT0999`;
+      const res = await fetch(url);
+      const json = await res.json();
+      if (json.data) {
+        const row = json.data.find((r: any[]) => r[0].trim() === symbol);
+        if (row) {
+          const f = safeNum(row[4]);    // 外資買賣超股數
+          const t = safeNum(row[10]);   // 投信買賣超股數
+          const d = safeNum(row[11]);   // 自營商買賣超股數(合計)
+          const total = safeNum(row[16]); // 三大法人買賣超股數
+          
+          return {
+            foreign: Math.round(f / 1000),
+            trust: Math.round(t / 1000),
+            dealer: Math.round(d / 1000),
+            total: Math.round(total / 1000)
+          };
+        }
+      }
+    } else {
+      // TPEx
+      const rocDate = getROCDate(new Date(date));
+      const url = `/api/tpex/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=json&se=EW&t=D&d=${rocDate}`;
+      const res = await fetch(url);
+      const json = await res.json();
+      if (json.aaData) {
+        const row = json.aaData.find((r: any[]) => r[0].trim() === symbol);
+        if (row) {
+          // TPEx Columns: 0:ID, 1:Name, 4:ForeignNet, 7:TrustNet, 10:DealerNet, 11:Total (Units are 1000 shares)
+          const foreign = safeNum(row[4]);
+          const trust = safeNum(row[7]);
+          const dealer = safeNum(row[10]);
+          const total = safeNum(row[11]);
+          return { foreign, trust, dealer, total };
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("Institutional fetch failed", e);
+  }
+  return { foreign: 0, trust: 0, dealer: 0, total: 0 };
+}
+
+async function fetchFinMindMargin(symbol: string, date: string) {
+  const token = localStorage.getItem("finmind_token") || (import.meta.env.VITE_FINMIND_TOKEN as string) || "";
+  if (!token) return null;
+  const url = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockMarginPurchaseShortSale&data_id=${symbol}&start_date=${date}&token=${token}`;
   try {
     const res = await fetch(url);
-    if (res.status === 401) return null; // Gracefully handle unauthorized (paid datasets)
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const json = await res.json();
-    if (json.status !== 200) return null;
-    return json.data;
-  } catch (error) {
-    console.error(`[FinMind] Fetch failed for ${params.dataset}:`, error);
-    return null;
+    if (json.status === 200 && json.data?.length > 0) {
+      return json.data[json.data.length - 1];
+    }
+  } catch (e) {
+    console.warn("FinMind Margin fetch failed", e);
+  }
+  return null;
+}
+
+async function fetchMarketIndices() {
+  try {
+    // TAIEX
+    const resT = await fetch(`/api/yahoo/%5ETWII?interval=1d&range=5d`);
+    const jsonT = await resT.json();
+    const resultT = jsonT.chart?.result?.[0];
+    const quoteT = resultT?.indicators.quote[0];
+    const closeT = quoteT?.close?.filter((c:any)=>c)?.[quoteT.close.length-1] || 0;
+    const prevT = quoteT?.close?.filter((c:any)=>c)?.[quoteT.close.length-2] || closeT;
+    const changeT = closeT - prevT;
+    const percentT = (changeT / prevT) * 100;
+
+    // OTC
+    const resO = await fetch(`/api/yahoo/%5ETWOII?interval=1d&range=5d`);
+    const jsonO = await resO.json();
+    const resultO = jsonO.chart?.result?.[0];
+    const quoteO = resultO?.indicators.quote[0];
+    const closeO = quoteO?.close?.filter((c:any)=>c)?.[quoteO.close.length-1] || 0;
+    const prevO = quoteO?.close?.filter((c:any)=>c)?.[quoteO.close.length-2] || closeO;
+    const changeO = closeO - prevO;
+    const percentO = (changeO / prevO) * 100;
+
+    return {
+      taiex: { close: closeT, change: changeT, percent: percentT },
+      otc: { close: closeO, change: changeO, percent: percentO }
+    };
+  } catch (e) {
+    console.warn("Indices fetch failed", e);
+    return {
+      taiex: { close: 0, change: 0, percent: 0 },
+      otc: { close: 0, change: 0, percent: 0 }
+    };
   }
 }
 
@@ -68,129 +237,89 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, defaultValue: T):
   return result;
 }
 
+async function fetchInstitutionalWithFallback(symbol: string, initialDate: string, suffix: string) {
+  let currentDateStr = initialDate;
+  for (let i = 0; i < 5; i++) {
+    const data = await fetchInstitutionalData(symbol, currentDateStr, suffix);
+    
+    if (data.foreign !== 0 || data.trust !== 0 || data.dealer !== 0) {
+      return { ...data, actualDate: currentDateStr };
+    }
+    // Go back one trading day
+    currentDateStr = getPrevTradingDay(currentDateStr);
+  }
+  return { foreign: 0, trust: 0, dealer: 0, total: 0, actualDate: initialDate };
+}
+
 export async function fetchAllStockData(symbol: string): Promise<StockData> {
-  const now = new Date();
-  const taiwanNow = new Date(now.getTime() + (now.getTimezoneOffset() * 60000) + (8 * 3600000));
-  
-  const endDateStr = getYYYY_MM_DD(taiwanNow);
-  const startDate = new Date(taiwanNow.getTime() - 15 * 24 * 60 * 60 * 1000); 
-  const startDateStr = getYYYY_MM_DD(startDate);
-
-  console.log(`[FinMind] Fetching data for ${symbol}`);
-
-  // 1. Get Stock Price (Daily) - Must succeed
-  const priceData = await fetchFinMind({
-    dataset: "TaiwanStockPrice",
-    data_id: symbol,
-    start_date: startDateStr,
-    end_date: endDateStr
-  });
-
-  if (!priceData || priceData.length === 0) {
-    throw new Error(`找不到股票 ${symbol} 的交易資料。請確認代碼是否正確或 Token 是否有效。`);
+  // 1. Get Price via Yahoo
+  const yahooData = await fetchYahooPrice(symbol);
+  if (!yahooData) {
+    throw new Error(`找不到股票 ${symbol} 的資產資料。請確認代碼是否正確。`);
   }
 
-  const latestPrice = priceData[priceData.length - 1];
-  const tradingDate = latestPrice.date;
-  const last5Days = priceData.slice(-5);
-  const avgVolume5D = last5Days.reduce((acc: number, d: any) => acc + d.Trading_Volume, 0) / last5Days.length;
+  const tradingDate = yahooData.date;
 
-  // 2. Fetch Margin, TAIEX and OTC Index from FinMind
-  // And call Gemini for Missing data
-  const [marginData, taiexData, otcData, geminiData] = await Promise.all([
-    fetchFinMind({
-      dataset: "TaiwanStockMarginPurchaseShortSale",
-      data_id: symbol,
-      start_date: tradingDate
-    }),
-    fetchFinMind({
-      dataset: "TaiwanStockPrice",
-      data_id: "TAIEX",
-      start_date: tradingDate
-    }),
-    fetchFinMind({
-      dataset: "TaiwanStockPrice",
-      data_id: "TWO",
-      start_date: tradingDate
-    }),
-    withTimeout(fetchMissingDataViaGemini(symbol, tradingDate), 15000, {
-      foreign:0, trust:0, dealer:0, instTotal:0,
-      marginBalance:0, marginChange:0,
-      advance:0, decline:0,
+  // 2. Parallel fetches (Initial inst fetch or wait? Let's keep parallel but handle inst delay)
+  // Actually, breadths (Gemini) might also need date adjustment if it's too early.
+  const [instResult, margin, indices, breadths] = await Promise.all([
+    fetchInstitutionalWithFallback(symbol, tradingDate, yahooData.suffix),
+    fetchFinMindMargin(symbol, tradingDate),
+    fetchMarketIndices(),
+    withTimeout(fetchMarketBreadthViaGemini(tradingDate), 15000, {
+      advance: 0,
+      decline: 0,
       note: "搜尋超時"
     })
   ]);
 
-  // 3. Institutional logic: Prefer Gemini search results
-  const foreign = geminiData.foreign;
-  const trust = geminiData.trust;
-  const dealer = geminiData.dealer;
-  const total = geminiData.instTotal || (foreign + trust + dealer);
+  console.log("[DEBUG] Institutional Data:", instResult);
 
-  // 4. Margin logic
-  const margin = marginData && marginData.length > 0 ? marginData[marginData.length - 1] : null;
-  const marginBalance = margin ? Number(margin.MarginPurchaseTodayBalance) : geminiData.marginBalance;
-  const marginYest = margin ? Number(margin.MarginPurchaseYesterdayBalance) : (geminiData.marginBalance - geminiData.marginChange);
-  const marginChange = margin ? (marginBalance - marginYest) : geminiData.marginChange;
-
-  // 5. Market Breadth logic
-  const upCount = geminiData.advance || 0;
-  const downCount = geminiData.decline || 0;
+  const foreign = safeNum(instResult.foreign);
+  const trust = safeNum(instResult.trust);
+  const dealer = safeNum(instResult.dealer);
+  const total = safeNum(instResult.total);
   
-  const taiex = taiexData && taiexData.length > 0 ? taiexData[taiexData.length - 1] : null;
-  const taiexChange = taiex ? taiex.spread : 0;
-  const taiexClose = taiex ? taiex.close : 1;
-  const taiexPercent = (taiexChange / (taiexClose - taiexChange)) * 100;
+  const marginBalance = margin ? safeNum(margin.MarginPurchaseTodayBalance) : 0;
+  const marginYest = margin ? safeNum(margin.MarginPurchaseYesterdayBalance) : marginBalance;
+  const marginChange = marginBalance - marginYest;
 
-  const otc = otcData && otcData.length > 0 ? otcData[otcData.length - 1] : null;
-  const otcChange = otc ? otc.spread : 0;
-  const otcClose = otc ? otc.close : 1;
-  const otcPercent = (otcChange / (otcClose - otcChange)) * 100;
-
-  // 6. Turnover Ratio
-  const turnoverRatio = (latestPrice.Trading_Volume / avgVolume5D) * 100;
+  const turnoverRatio = (yahooData.volume / (yahooData.avgVol5D || 1)) * 100;
 
   return {
     symbol,
-    name: symbol,
-    price: latestPrice.close,
-    change: latestPrice.spread,
-    changePercent: (latestPrice.spread / (latestPrice.close - latestPrice.spread)) * 100,
-    volume: latestPrice.Trading_Volume,
-    avgVolume5D,
+    name: symbol, // Could fetch name from Yahoo result if needed
+    price: yahooData.close,
+    change: yahooData.change,
+    changePercent: yahooData.changePercent,
+    volume: yahooData.volume,
+    avgVolume5D: yahooData.avgVol5D,
     turnoverRatio,
     institutions: {
       foreign,
       trust,
       dealer,
-      total
+      total: foreign + trust + dealer
     },
     margin: {
       balance: marginBalance,
       change: marginChange
     },
     marketBreadth: {
-      advance: upCount,
-      decline: downCount,
-      ratio: upCount / (downCount || 1)
+      advance: breadths.advance,
+      decline: breadths.decline,
+      ratio: breadths.advance / (breadths.decline || 1)
     },
     raw: {
       dateStr: tradingDate,
-      latestPrice,
-      marginData,
-      geminiNote: geminiData.note,
-      taiex: {
-        change: taiexChange,
-        close: taiexClose,
-        percent: taiexPercent
-      },
-      otc: {
-        change: otcChange,
-        close: otcClose,
-        percent: otcPercent
-      },
-      note: `大盤今日${taiexChange > 0 ? "漲" : "跌"} ${Math.abs(taiexChange)} 點 (${taiexPercent.toFixed(2)}%)，櫃買指數 ${otcPercent.toFixed(2)}%。` + 
-            (upCount > 0 ? ` 漲跌家數：${upCount}/${downCount}。` : "")
+      institutionDate: instResult.actualDate,
+      latestPrice: { close: yahooData.close, spread: yahooData.change, Trading_Volume: yahooData.volume },
+      marginData: margin ? [margin] : [],
+      geminiNote: breadths.note,
+      taiex: indices.taiex,
+      otc: indices.otc,
+      note: `大盤今日${indices.taiex.change > 0 ? "漲" : "跌"} ${Math.abs(indices.taiex.change).toFixed(2)} 點 (${indices.taiex.percent.toFixed(2)}%)，櫃買指數 ${indices.otc.percent.toFixed(2)}%。` + 
+            (breadths.advance > 0 ? ` 漲跌家數：${breadths.advance}/${breadths.decline}。` : "")
     }
   };
 }
