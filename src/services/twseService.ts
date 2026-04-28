@@ -72,14 +72,84 @@ function getPrevTradingDay(dateStr: string): string {
   return d.toISOString().split('T')[0];
 }
 
+async function fetchPriceFallback(symbol: string, suffix: string) {
+  // Try FinMind first if token exists
+  const token = localStorage.getItem("finmind_token") || (import.meta.env.VITE_FINMIND_TOKEN as string) || "";
+  if (token) {
+    try {
+      const today = new Date();
+      const dateStr = today.toISOString().split('T')[0];
+      const url = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${symbol}&start_date=${dateStr}&token=${token}`;
+      const res = await fetch(url);
+      const json = await res.json();
+      if (json.data?.length > 0) {
+        const last = json.data[json.data.length - 1];
+        return {
+          symbol: `${symbol}${suffix}`,
+          close: Number(last.close),
+          change: Number(last.spread),
+          changePercent: (Number(last.spread) / (Number(last.close) - Number(last.spread))) * 100,
+          volume: Number(last.Trading_Volume),
+          avgVol5D: Number(last.Trading_Volume), // Fallback to same
+          date: last.date,
+          suffix
+        };
+      }
+    } catch (e) {
+      console.warn(`FinMind Price Fallback failed for ${symbol}`, e);
+    }
+  }
+
+  // Final effort: TWSE/TPEx daily all (Heavy but reliable)
+  try {
+    if (suffix === ".TW") {
+      const url = `/api/twse/exchangeReport/STOCK_DAY_ALL?response=json`;
+      const res = await fetch(url);
+      const json = await res.json();
+      if (json.data) {
+        const row = json.data.find((r: any[]) => r[0] === symbol);
+        if (row) {
+          // TWSE STOCK_DAY_ALL: 0:Code, 1:Name, 2:Vol, 3:Turnover, 4:Open, 5:High, 6:Low, 7:Close, 8:Change, 9:Trans
+          const close = safeNum(row[7]);
+          const change = safeNum(row[8]);
+          return {
+            symbol: `${symbol}${suffix}`,
+            close,
+            change,
+            changePercent: (change / (close - change)) * 100,
+            volume: safeNum(row[2]),
+            avgVol5D: safeNum(row[2]),
+            date: json.date ? json.date.substring(0, 4) + "-" + json.date.substring(4, 6) + "-" + json.date.substring(6, 8) : new Date().toISOString().split('T')[0],
+            suffix
+          };
+        }
+      }
+    }
+  } catch (e) {
+    console.warn(`Final Price Fallback failed for ${symbol}`, e);
+  }
+  return null;
+}
+
 async function fetchYahooPrice(symbol: string) {
   const suffixes = [".TW", ".TWO"];
   for (const suffix of suffixes) {
     try {
       const url = `/api/yahoo/${symbol}${suffix}?interval=1d&range=1mo`;
       const res = await fetch(url);
+      if (!res.ok) {
+        console.warn(`Yahoo Proxy Error (${res.status}) for ${symbol}${suffix}. Attempting fallback...`);
+        const fb = await fetchPriceFallback(symbol, suffix);
+        if (fb) return fb;
+        continue;
+      }
       const json = await res.json();
-      if (!json.chart?.result?.[0]) continue;
+      if (!json.chart?.result?.[0]) {
+        console.warn(`Yahoo result empty for ${symbol}${suffix}, attempting fallback...`);
+        const fb = await fetchPriceFallback(symbol, suffix);
+        if (fb) return fb;
+        continue;
+      }
 
       const result = json.chart.result[0];
       const indicators = result.indicators.quote[0];
@@ -192,38 +262,100 @@ async function fetchFinMindMargin(symbol: string, date: string) {
   return null;
 }
 
-async function fetchMarketIndices() {
+async function fetchIndicesFallback() {
+  const defaultIndices = {
+    taiex: { close: 0, change: 0, percent: 0 },
+    otc: { close: 0, change: 0, percent: 0 }
+  };
+
   try {
-    // TAIEX
-    const resT = await fetch(`/api/yahoo/%5ETWII?interval=1d&range=5d`);
-    const jsonT = await resT.json();
-    const resultT = jsonT.chart?.result?.[0];
-    const quoteT = resultT?.indicators.quote[0];
-    const closeT = quoteT?.close?.filter((c:any)=>c)?.[quoteT.close.length-1] || 0;
-    const prevT = quoteT?.close?.filter((c:any)=>c)?.[quoteT.close.length-2] || closeT;
-    const changeT = closeT - prevT;
-    const percentT = (changeT / prevT) * 100;
-
-    // OTC
-    const resO = await fetch(`/api/yahoo/%5ETWOII?interval=1d&range=5d`);
-    const jsonO = await resO.json();
-    const resultO = jsonO.chart?.result?.[0];
-    const quoteO = resultO?.indicators.quote[0];
-    const closeO = quoteO?.close?.filter((c:any)=>c)?.[quoteO.close.length-1] || 0;
-    const prevO = quoteO?.close?.filter((c:any)=>c)?.[quoteO.close.length-2] || closeO;
-    const changeO = closeO - prevO;
-    const percentO = (changeO / prevO) * 100;
-
-    return {
-      taiex: { close: closeT, change: changeT, percent: percentT },
-      otc: { close: closeO, change: changeO, percent: percentO }
-    };
+    // Try TWSE Market Summary (MI_INDEX MS)
+    // We need a loop to find the latest valid date
+    let current = new Date();
+    current.setTime(current.getTime() + 8 * 3600 * 1000); // TW Time
+    
+    for (let i = 0; i < 5; i++) {
+      const y = current.getUTCFullYear();
+      const m = String(current.getUTCMonth() + 1).padStart(2, "0");
+      const d = String(current.getUTCDate()).padStart(2, "0");
+      const dateStr = `${y}${m}${d}`;
+      
+      const res = await fetch(`/api/twse/exchangeReport/MI_INDEX?response=json&date=${dateStr}&type=MS`);
+      const json = await res.json();
+      
+      if (json.stat === "OK" && json.data7) {
+        // TWSE data7 usually contains index data
+        // Row 0 is TAIEX
+        const taiexRow = json.data7[0];
+        if (taiexRow) {
+          // 1: Index, 2: Change Sign, 3: Change Value, 4: Percent
+          const close = safeNum(taiexRow[1]);
+          const changeVal = safeNum(taiexRow[3]);
+          const sign = taiexRow[2].includes("color:red") || taiexRow[2].includes("+") ? 1 : -1;
+          const change = changeVal * sign;
+          const prev = close - change;
+          
+          return {
+            taiex: { close, change, percent: (change / prev) * 100 },
+            otc: defaultIndices.otc // OTC needs another fetch usually
+          };
+        }
+      }
+      current.setTime(current.getTime() - 86400000);
+    }
   } catch (e) {
-    console.warn("Indices fetch failed", e);
-    return {
-      taiex: { close: 0, change: 0, percent: 0 },
-      otc: { close: 0, change: 0, percent: 0 }
-    };
+    console.warn("Index fallback failed", e);
+  }
+  return defaultIndices;
+}
+
+async function fetchMarketIndices() {
+  const defaultIndices = {
+    taiex: { close: 0, change: 0, percent: 0 },
+    otc: { close: 0, change: 0, percent: 0 }
+  };
+  
+  try {
+    const yahooIndices = await withTimeout((async () => {
+      // TAIEX
+      const resT = await fetch(`/api/yahoo/%5ETWII?interval=1d&range=5d`);
+      let taiex = { close: 0, change: 0, percent: 0 };
+      if (resT.ok) {
+        const jsonT = await resT.json();
+        const resultT = jsonT.chart?.result?.[0];
+        const quoteT = resultT?.indicators.quote[0];
+        const closesT = quoteT?.close?.filter((c:any) => c !== null) || [];
+        if (closesT.length >= 2) {
+          const closeT = closesT[closesT.length - 1];
+          const prevT = closesT[closesT.length - 2];
+          taiex = { close: closeT, change: closeT - prevT, percent: ((closeT - prevT) / prevT) * 100 };
+        }
+      }
+
+      // OTC
+      const resO = await fetch(`/api/yahoo/%5ETWOII?interval=1d&range=5d`);
+      let otc = { close: 0, change: 0, percent: 0 };
+      if (resO.ok) {
+        const jsonO = await resO.json();
+        const resultO = jsonO.chart?.result?.[0];
+        const quoteO = resultO?.indicators.quote[0];
+        const closesO = quoteO?.close?.filter((c:any) => c !== null) || [];
+        if (closesO.length >= 2) {
+          const closeO = closesO[closesO.length - 1];
+          const prevO = closesO[closesO.length - 2];
+          otc = { close: closeO, change: closeO - prevO, percent: ((closeO - prevO) / prevO) * 100 };
+        }
+      }
+
+      if (taiex.close === 0) throw new Error("Yahoo Failed");
+      return { taiex, otc };
+    })(), 8000, null);
+
+    if (yahooIndices) return yahooIndices;
+    return await fetchIndicesFallback();
+  } catch (e) {
+    console.warn("Indices fetch failed, using fallback", e);
+    return await fetchIndicesFallback();
   }
 }
 

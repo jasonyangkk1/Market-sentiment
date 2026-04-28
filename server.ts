@@ -15,26 +15,59 @@ async function startServer() {
 
   // Yahoo Finance Proxy
   app.get("/api/yahoo/*", async (req, res) => {
-    try {
-      const yahooPath = req.params[0];
-      const query = new URLSearchParams(req.query as any).toString();
-      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooPath}?${query}`;
-      
-      console.log(`[PROXY] Fetching Yahoo: ${url}`);
-      
-      const response = await axios({
-        method: "get",
-        url: url,
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        },
-        timeout: 10000 
-      });
-      res.json(response.data);
-    } catch (error: any) {
-      console.error("[PROXY] Yahoo Error:", error.message);
-      res.status(error.response?.status || 500).json({ error: error.message });
+    const yahooPath = req.params[0];
+    const query = new URLSearchParams(req.query as any).toString();
+    const urls = [
+      `https://query1.finance.yahoo.com/v8/finance/chart/${yahooPath}?${query}`,
+      `https://query2.finance.yahoo.com/v8/finance/chart/${yahooPath}?${query}`
+    ];
+    
+    const userAgents = [
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:125.0) Gecko/20100101 Firefox/125.0"
+    ];
+
+    let lastError = null;
+    for (const url of urls) {
+      try {
+        const randomUA = userAgents[Math.floor(Math.random() * userAgents.length)];
+        console.log(`[PROXY] Attempting Yahoo: ${url}`);
+        
+        const response = await axios({
+          method: "get",
+          url: url,
+          headers: {
+            "User-Agent": randomUA,
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9,zh-TW;q=0.8,zh;q=0.7",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Referer": "https://finance.yahoo.com/quote/AAPL", // Dynamic-looking referer
+            "Origin": "https://finance.yahoo.com"
+          },
+          timeout: 8000 
+        });
+        return res.json(response.data);
+      } catch (error: any) {
+        lastError = error;
+        console.warn(`[PROXY] Yahoo Attempt failed (${error.response?.status}): ${error.message}`);
+        if (error.response?.status === 429) {
+          // Wait briefly if rate limited before trying next URL
+          await new Promise(r => setTimeout(r, 500));
+        }
+      }
     }
+
+    console.error("[PROXY] All Yahoo attempts failed");
+    res.status(lastError?.response?.status || 500).json({ 
+      error: "Yahoo Finance Proxy Error", 
+      message: lastError?.message,
+      detail: lastError?.response?.data
+    });
   });
 
   // TPEx Proxy Routes
