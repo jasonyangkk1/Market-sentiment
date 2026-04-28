@@ -38,7 +38,12 @@ export async function analyzeStock(data: StockData): Promise<AnalysisResult> {
 - 收盤價: ${price} (漲跌: ${change})
 - 今日成交量: ${volume} 張
 - 5日均量: ${avgVolume5D.toFixed(0)} 張
-- 三大法人合計買賣超: ${institutions.total} 張 (外資: ${institutions.foreign}, 投信: ${institutions.trust}, 自營: ${institutions.dealer})
+- 三大法人買賣超狀況：
+  ${data.raw.institutionNoActivity 
+    ? "【警示：今日三大法人均無買賣紀錄 (不在 T86 名單中)】" 
+    : data.raw.institutionDataFound 
+      ? `合計買賣超: ${institutions.total} 張 (外資: ${institutions.foreign}, 投信: ${institutions.trust}, 自營: ${institutions.dealer})`
+      : "【錯誤：目前暫時無法取得三大法人買賣超資料 (API 異常)】"}
 - 融資餘額: ${margin.balance} 張 (今日增減: ${margin.change} 張)
 
 【市場環境】
@@ -49,6 +54,7 @@ export async function analyzeStock(data: StockData): Promise<AnalysisResult> {
 
 任務指令：
 1. **詳盡指標說明**：每個 indicators 欄位格式：「[數據判讀]。[判讀邏輯]。[因此評為看多/看空]。」
+   - 對於「關鍵分點 (Insider Shadow)」，若顯示「無買賣紀錄」，請解讀為「今日市場主力對此股無關注度，可能進入橫盤整理或被邊緣化」並給予【中立/觀望】評價。
    - 對於「大盤環境濾網」，請特別注意「加權指數」與「櫃買指數」的背離：
      - 若加權指數大漲但櫃買指數微漲或下跌，且漲跌家數顯示「跌多漲少」，這屬於典型的「拉積盤（拉大出小）」，對一般個股（特別是中小型股）不利，應給予【保守/看空】評價。
      - 若兩者同步上漲且上漲家數大於下跌家數，則為健康的「普漲環境」，給予【看多】評價。

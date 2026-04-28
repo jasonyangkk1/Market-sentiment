@@ -171,119 +171,212 @@ async function fetchPriceFallback(symbol: string, suffix: string) {
   return null;
 }
 
-async function fetchYahooPrice(symbol: string) {
-  const suffixes = [".TW", ".TWO"];
-  for (const suffix of suffixes) {
+const clean = (s: string) => String(s || "").trim().replace(/\s/g, '');
+
+async function fetchStockPrice(symbol: string) {
+  const cleanSymbol = clean(symbol);
+  // Check Cache first
+  const cacheKey = `price_${symbol}`;
+  const cached = sessionStorage.getItem(cacheKey);
+  if (cached) {
     try {
-      const url = `/api/yahoo?symbol=${symbol}${suffix}&interval=1d&range=1mo`;
-      const res = await fetch(url);
-      if (!res.ok) {
-        console.warn(`Yahoo Proxy Error (${res.status}) for ${symbol}${suffix}. Attempting fallback...`);
-        const fb = await fetchPriceFallback(symbol, suffix);
-        if (fb) return fb;
-        continue;
+      const { data, expiry } = JSON.parse(cached);
+      if (Date.now() < expiry) {
+        console.log(`[CACHE] Using cached data for ${symbol}`);
+        return data;
       }
-      const json = await res.json();
-      if (!json.chart?.result?.[0]) {
-        console.warn(`Yahoo result empty for ${symbol}${suffix}, attempting fallback...`);
-        const fb = await fetchPriceFallback(symbol, suffix);
-        if (fb) return fb;
-        continue;
-      }
-
-      const result = json.chart.result[0];
-      const indicators = result.indicators.quote[0];
-      const timestamps = result.timestamp;
-      
-      const closes = indicators.close || [];
-      const volumes = indicators.volume || [];
-      const opens = indicators.open || [];
-      
-      // Get valid data (filter nulls)
-      const validIndices = closes.map((c: any, i: number) => c !== null ? i : -1).filter((i: number) => i !== -1);
-      
-      if (validIndices.length === 0) continue;
-
-      const latestIdx = validIndices[validIndices.length - 1];
-      const close = closes[latestIdx];
-      const open = opens[latestIdx];
-      const volume = volumes[latestIdx];
-      const change = close - opens[latestIdx]; // Approx change from open if no prev close
-      
-      // More accurate change if enough data
-      let prevClose = close;
-      if (validIndices.length > 1) {
-        prevClose = closes[validIndices[validIndices.length - 2]];
-      }
-      
-      const actualChange = close - prevClose;
-      const changePercent = (actualChange / prevClose) * 100;
-      
-      // Last 5 days volume
-      const last5Volumes = validIndices.slice(-5).map(i => volumes[i]);
-      const avgVol5D = last5Volumes.reduce((a, b) => a + b, 0) / last5Volumes.length;
-
-      return {
-        symbol: `${symbol}${suffix}`,
-        close,
-        change: actualChange,
-        changePercent,
-        volume,
-        avgVol5D,
-        date: new Date(timestamps[latestIdx] * 1000 + 8 * 3600 * 1000).toISOString().split('T')[0],
-        suffix
-      };
-    } catch (e) {
-      console.warn(`Yahoo fetch failed for ${symbol}${suffix}`, e);
+    } catch(e) { 
+      sessionStorage.removeItem(cacheKey);
     }
   }
-  return null;
-}
 
-async function fetchInstitutionalData(symbol: string, date: string, suffix: string) {
   try {
-    if (suffix === ".TW") {
-      const url = `/api/twse?path=/rwd/zh/fund/T86&response=json&date=${date.replace(/-/g, '')}&selectType=ALLBUT0999`;
-      const res = await fetch(url);
-      const json = await res.json();
-      if (json.data) {
-        const row = json.data.find((r: any[]) => r[0].trim() === symbol);
-        if (row) {
-          const f = safeNum(row[4]);    // 外資買賣超股數
-          const t = safeNum(row[10]);   // 投信買賣超股數
-          const d = safeNum(row[11]);   // 自營商買賣超股數(合計)
-          const total = safeNum(row[16]); // 三大法人買賣超股數
-          
-          return {
-            foreign: Math.round(f / 1000),
-            trust: Math.round(t / 1000),
-            dealer: Math.round(d / 1000),
-            total: Math.round(total / 1000)
-          };
+    // 1. Try TWSE (Listed)
+    const twseAllUrl = `/api/twse?path=/exchangeReport/STOCK_DAY_ALL&response=json`;
+    const twseRes = await fetch(twseAllUrl);
+    const twseJson = await twseRes.json();
+    
+    if (twseJson.data) {
+      const row = twseJson.data.find((r: any[]) => clean(r[0]) === cleanSymbol);
+      if (row) {
+        // ... (rest of TWSE logic remains the same)
+        const close = safeNum(row[7]);
+        const changeStr = String(row[8] || "0");
+        let change = safeNum(changeStr.replace(/[▲▼+]/g, ''));
+        if (changeStr.includes("▼") || changeStr.includes("-")) {
+          change = -change;
         }
+        
+        const volume = safeNum(row[2]) / 1000;
+        let date = new Date().toISOString().split('T')[0];
+        if (twseJson.date && twseJson.date.length === 8) {
+          date = `${twseJson.date.substring(0, 4)}-${twseJson.date.substring(4, 6)}-${twseJson.date.substring(6, 8)}`;
+        }
+
+        let avgVol5D = volume;
+        try {
+          const histUrl = `/api/twse?path=/exchangeReport/STOCK_DAY&response=json&date=${date.replace(/-/g,'')}&stockNo=${symbol}`;
+          const histRes = await fetch(histUrl);
+          const histJson = await histRes.json();
+          if (histJson.data && histJson.data.length > 0) {
+            const last5 = histJson.data.slice(-5);
+            const sum = last5.reduce((acc: number, r: any[]) => acc + (safeNum(r[1]) / 1000), 0);
+            avgVol5D = sum / last5.length;
+          }
+        } catch (e) {
+          console.warn(`Failed to fetch historical volume for ${symbol}`, e);
+        }
+
+        const data = {
+          symbol: `${symbol}.TW`,
+          close,
+          change,
+          changePercent: (change / (close - change || 1)) * 100,
+          volume,
+          avgVol5D,
+          date,
+          suffix: ".TW"
+        };
+        sessionStorage.setItem(cacheKey, JSON.stringify({ data, expiry: Date.now() + 300000 }));
+        return data;
       }
-    } else {
-      // TPEx
-      const rocDate = getROCDate(new Date(date));
-      const url = `/api/tpex?path=/web/stock/3insti/daily_trade/3itrade_hedge_result.php&l=zh-tw&o=json&se=EW&t=D&d=${rocDate}`;
-      const res = await fetch(url);
-      const json = await res.json();
-      if (json.aaData) {
-        const row = json.aaData.find((r: any[]) => r[0].trim() === symbol);
-        if (row) {
-          // TPEx Columns: 0:ID, 1:Name, 4:ForeignNet, 7:TrustNet, 10:DealerNet, 11:Total (Units are 1000 shares)
-          const foreign = safeNum(row[4]);
-          const trust = safeNum(row[7]);
-          const dealer = safeNum(row[10]);
-          const total = safeNum(row[11]);
-          return { foreign, trust, dealer, total };
+    }
+
+    // 2. Try TPEx (OTC)
+    const tpexAllUrl = `/api/tpex?path=/web/stock/aftertrading/otc_trading_summary/result.php&l=zh-tw&o=json&se=AL`;
+    const tpexRes = await fetch(tpexAllUrl);
+    const tpexJson = await tpexRes.json();
+    
+    if (tpexJson.aaData) {
+      const row = tpexJson.aaData.find((r: any[]) => clean(r[0]) === cleanSymbol);
+      if (row) {
+        const close = safeNum(row[2]);
+        const change = safeNum(row[3]);
+        const volume = safeNum(row[7]);
+        
+        let date = new Date().toISOString().split('T')[0];
+        if (tpexJson.reportDate) {
+           const parts = tpexJson.reportDate.split('/');
+           if (parts.length === 3) {
+              date = `${Number(parts[0]) + 1911}-${parts[1]}-${parts[2]}`;
+           }
         }
+
+        let avgVol5D = volume;
+        try {
+          const histUrl = `/api/tpex?path=/web/stock/aftertrading/daily_trading_info/stk_quote_result.php&l=zh-tw&o=json&stkno=${symbol}`;
+          const histRes = await fetch(histUrl);
+          const histJson = await histRes.json();
+          if (histJson.aaData && histJson.aaData.length > 0) {
+            const last5 = histJson.aaData.slice(-5);
+            const sum = last5.reduce((acc: number, r: any[]) => acc + safeNum(r[1]), 0);
+            avgVol5D = sum / last5.length;
+          }
+        } catch (e) {
+          console.warn(`Failed to fetch historical volume for ${symbol} (OTC)`, e);
+        }
+
+        const data = {
+          symbol: `${symbol}.TWO`,
+          close,
+          change,
+          changePercent: (change / (close - change || 1)) * 100,
+          volume,
+          avgVol5D,
+          date,
+          suffix: ".TWO"
+        };
+        sessionStorage.setItem(cacheKey, JSON.stringify({ data, expiry: Date.now() + 300000 }));
+        return data;
       }
     }
   } catch (e) {
-    console.warn("Institutional fetch failed", e);
+    console.error(`fetchStockPrice error for ${symbol}`, e);
   }
-  return { foreign: 0, trust: 0, dealer: 0, total: 0 };
+
+  return await fetchPriceFallback(symbol, "");
+}
+
+async function fetchInstitutionalData(symbol: string, date: string, suffix: string): Promise<{ foreign: number, trust: number, dealer: number, total: number, found: boolean, reason?: 'notInList' | 'apiError', noActivity?: boolean }> {
+  const cleanSymbol = clean(symbol);
+
+  const performFetch = async (targetSuffix: string) => {
+    try {
+      if (targetSuffix === ".TW") {
+        const types = ["ALLBUT0999", "0099P", "0015", "0049"];
+        let foundAnyList = false;
+        for (const type of types) {
+          const url = `/api/twse?path=/rwd/zh/fund/T86&response=json&date=${date.replace(/-/g, '')}&selectType=${type}`;
+          const res = await fetch(url);
+          const json = await res.json();
+          
+          if (json.stat === "OK" && json.data && json.data.length > 0) {
+            foundAnyList = true;
+            const row = json.data.find((r: any[]) => clean(r[0]) === cleanSymbol);
+            if (row) {
+              return {
+                foreign: Math.round(safeNum(row[4]) / 1000),
+                trust: Math.round(safeNum(row[10]) / 1000),
+                dealer: Math.round(safeNum(row[11]) / 1000),
+                total: Math.round(safeNum(row[16]) / 1000),
+                found: true,
+                noActivity: false
+              };
+            }
+          }
+        }
+        if (foundAnyList) return { foreign: 0, trust: 0, dealer: 0, total: 0, found: true, noActivity: true, reason: 'notInList' as const };
+      } else {
+        // TPEx - Use individual stock institutional report for better reliability
+        const rocDate = getROCDate(new Date(date));
+        const url = `/api/tpex?path=/web/stock/3insti/daily_trade/3itrade_result.php&l=zh-tw&o=json&stkno=${symbol}&d=${rocDate}`;
+        const res = await fetch(url);
+        const json = await res.json();
+        
+        // Single stock report structure differs: json.aaData is usually 1 row OR empty
+        if (json.aaData && json.aaData.length > 0) {
+          const row = json.aaData[0]; 
+          // 3itrade_result.php fields: 0:Date, 1:Symbol, 2:Name, 3:ForeignBuy, 4:ForeignSell, 5:ForeignNet, 6:TrustBuy, 7:TrustSell, 8:TrustNet, 9:DealerBuy, 10:DealerSell, 11:DealerNet, 12:TotalNet
+          return {
+            foreign: safeNum(row[5]),
+            trust: safeNum(row[8]),
+            dealer: safeNum(row[11]),
+            total: safeNum(row[12]),
+            found: true,
+            noActivity: false
+          };
+        }
+        
+        // If empty aaData, it usually means no activity for this stock on this date
+        // But we should verify if the T86 market-wide list is actually available to confirm "no activity" vs "API error"
+        // For simplicity, if we got a valid JSON but no rows for this specific stokno, we treat as no activity.
+        return { foreign: 0, trust: 0, dealer: 0, total: 0, found: true, noActivity: true, reason: 'notInList' as const };
+      }
+    } catch (e) {
+      console.warn(`[Inst] ${targetSuffix} fetch failed for ${symbol}`, e);
+      return { foreign: 0, trust: 0, dealer: 0, total: 0, found: false, reason: 'apiError' as const };
+    }
+    return null;
+  };
+
+  // 1. Try primary market
+  let result = await performFetch(suffix);
+  // If definitely found WITH data, return.
+  if (result && result.found && !result.noActivity) return result;
+
+  // 2. Cross-verify with the other market (just in case of misidentification or dual listing/weirdness)
+  const otherSuffix = suffix === ".TW" ? ".TWO" : ".TW";
+  const otherResult = await performFetch(otherSuffix);
+  
+  if (otherResult && otherResult.found && !otherResult.noActivity) return otherResult;
+
+  // 3. Fallback: If either market confirmed "notInList", we trust it's no activity
+  if (result?.reason === 'notInList' || otherResult?.reason === 'notInList') {
+    return { foreign: 0, trust: 0, dealer: 0, total: 0, found: true, noActivity: true, reason: 'notInList' as const };
+  }
+
+  // 4. If everything failed (API errors or no lists at all), return apiError
+  return { foreign: 0, trust: 0, dealer: 0, total: 0, found: false, reason: 'apiError' as const };
 }
 
 async function fetchFinMindMargin(symbol: string, date: string) {
@@ -313,11 +406,11 @@ async function fetchIndicesFallback() {
   };
 
   try {
-    // Try TWSE Market Summary (MI_INDEX MS)
-    // We need a loop to find the latest valid date
+    // 1. Try TWSE Market Summary (MI_INDEX MS) for TAIEX
     let current = new Date();
     current.setTime(current.getTime() + 8 * 3600 * 1000); // TW Time
     
+    let taiexData = defaultIndices.taiex;
     for (let i = 0; i < 5; i++) {
       const y = current.getUTCFullYear();
       const m = String(current.getUTCMonth() + 1).padStart(2, "0");
@@ -328,25 +421,42 @@ async function fetchIndicesFallback() {
       const json = await res.json();
       
       if (json.stat === "OK" && json.data7) {
-        // TWSE data7 usually contains index data
-        // Row 0 is TAIEX
         const taiexRow = json.data7[0];
         if (taiexRow) {
-          // 1: Index, 2: Change Sign, 3: Change Value, 4: Percent
           const close = safeNum(taiexRow[1]);
           const changeVal = safeNum(taiexRow[3]);
-          const sign = taiexRow[2].includes("color:red") || taiexRow[2].includes("+") ? 1 : -1;
+          const sign = (taiexRow[2] || "").includes("color:red") || (taiexRow[2] || "").includes("+") ? 1 : -1;
           const change = changeVal * sign;
           const prev = close - change;
-          
-          return {
-            taiex: { close, change, percent: (change / prev) * 100 },
-            otc: defaultIndices.otc // OTC needs another fetch usually
-          };
+          taiexData = { close, change, percent: (change / prev) * 100 };
+          break;
         }
       }
       current.setTime(current.getTime() - 86400000);
     }
+
+    // 2. Try TPEx Market Summary for OTC
+    let otcData = defaultIndices.otc;
+    const resO = await fetch(`/api/tpex?path=/web/stock/aftertrading/otc_trading_summary/result.php&l=zh-tw&o=json`);
+    const jsonO = await resO.json();
+    if (jsonO.reportDate) {
+      // Find "櫃買指數" row usually in some data field, or just use the first row if it matches
+      // TPEx API is a bit complex for summary, but often it has aggregate data.
+      // Alternatively, just try to get it from historical if today fails.
+      const url = `/api/tpex?path=/web/stock/aftertrading/daily_trading_index/stk_index_result.php&l=zh-tw&o=json`;
+      const resIdx = await fetch(url);
+      const jsonIdx = await resIdx.json();
+      if (jsonIdx.iTotalRecords > 0) {
+        const last = jsonIdx.aaData[jsonIdx.aaData.length - 1];
+        // 1: Index, 2: Change
+        const close = safeNum(last[1]);
+        const change = safeNum(last[2]);
+        const prev = close - change;
+        otcData = { close, change, percent: (change / prev) * 100 };
+      }
+    }
+
+    return { taiex: taiexData, otc: otcData };
   } catch (e) {
     console.warn("Index fallback failed", e);
   }
@@ -354,52 +464,33 @@ async function fetchIndicesFallback() {
 }
 
 async function fetchMarketIndices() {
-  const defaultIndices = {
-    taiex: { close: 0, change: 0, percent: 0 },
-    otc: { close: 0, change: 0, percent: 0 }
-  };
-  
+  const cacheKey = `market_indices`;
+  const cached = sessionStorage.getItem(cacheKey);
+  if (cached) {
+    try {
+      const { data, expiry } = JSON.parse(cached);
+      if (Date.now() < expiry) {
+        console.log(`[CACHE] Using cached market indices`);
+        return data;
+      }
+    } catch(e) { 
+      sessionStorage.removeItem(cacheKey);
+    }
+  }
+
   try {
-    const yahooIndices = await withTimeout((async () => {
-      // TAIEX
-      const resT = await fetch(`/api/yahoo?symbol=%5ETWII&interval=1d&range=5d`);
-      let taiex = { close: 0, change: 0, percent: 0 };
-      if (resT.ok) {
-        const jsonT = await resT.json();
-        const resultT = jsonT.chart?.result?.[0];
-        const quoteT = resultT?.indicators.quote[0];
-        const closesT = quoteT?.close?.filter((c:any) => c !== null) || [];
-        if (closesT.length >= 2) {
-          const closeT = closesT[closesT.length - 1];
-          const prevT = closesT[closesT.length - 2];
-          taiex = { close: closeT, change: closeT - prevT, percent: ((closeT - prevT) / prevT) * 100 };
-        }
-      }
-
-      // OTC
-      const resO = await fetch(`/api/yahoo?symbol=%5ETWOII&interval=1d&range=5d`);
-      let otc = { close: 0, change: 0, percent: 0 };
-      if (resO.ok) {
-        const jsonO = await resO.json();
-        const resultO = jsonO.chart?.result?.[0];
-        const quoteO = resultO?.indicators.quote[0];
-        const closesO = quoteO?.close?.filter((c:any) => c !== null) || [];
-        if (closesO.length >= 2) {
-          const closeO = closesO[closesO.length - 1];
-          const prevO = closesO[closesO.length - 2];
-          otc = { close: closeO, change: closeO - prevO, percent: ((closeO - prevO) / prevO) * 100 };
-        }
-      }
-
-      if (taiex.close === 0) throw new Error("Yahoo Failed");
-      return { taiex, otc };
-    })(), 8000, null);
-
-    if (yahooIndices) return yahooIndices;
-    return await fetchIndicesFallback();
+    // Skip Yahoo, go straight to official APIs
+    const finalIndices = await fetchIndicesFallback();
+    
+    // Cache for 5 minutes
+    sessionStorage.setItem(cacheKey, JSON.stringify({ data: finalIndices, expiry: Date.now() + 300000 }));
+    
+    return finalIndices;
   } catch (e) {
     console.warn("Indices fetch failed, using fallback", e);
-    return await fetchIndicesFallback();
+    const fallback = await fetchIndicesFallback();
+    sessionStorage.setItem(cacheKey, JSON.stringify({ data: fallback, expiry: Date.now() + 300000 }));
+    return fallback;
   }
 }
 
@@ -418,28 +509,35 @@ async function fetchInstitutionalWithFallback(symbol: string, initialDate: strin
   for (let i = 0; i < 5; i++) {
     const data = await fetchInstitutionalData(symbol, currentDateStr, suffix);
     
-    if (data.foreign !== 0 || data.trust !== 0 || data.dealer !== 0) {
-      return { ...data, actualDate: currentDateStr };
+    if (data.found) {
+      return { ...data, actualDate: currentDateStr, noActivity: false };
     }
-    // Go back one trading day
+
+    if (data.reason === 'notInList') {
+      // Confirmed no activity today, stop fallback and return zeros
+      console.log(`[Inst] ${symbol} no activity on ${currentDateStr} (confirmed by empty search in T86 list)`);
+      return { ...data, actualDate: currentDateStr, noActivity: true, found: true };
+    }
+
+    console.log(`[Inst] ${symbol} fetch failed (apiError) on ${currentDateStr}, retrying previous day...`);
     currentDateStr = getPrevTradingDay(currentDateStr);
   }
-  return { foreign: 0, trust: 0, dealer: 0, total: 0, actualDate: initialDate };
+  return { foreign: 0, trust: 0, dealer: 0, total: 0, found: false, actualDate: initialDate, noActivity: false };
 }
 
 export async function fetchAllStockData(symbol: string): Promise<StockData> {
-  // 1. Get Price via Yahoo
-  const yahooData = await fetchYahooPrice(symbol);
-  if (!yahooData) {
+  // 1. Get Price via Official APIs
+  const stockPriceData = await fetchStockPrice(symbol);
+  if (!stockPriceData) {
     throw new Error(`找不到股票 ${symbol} 的資產資料。請確認代碼是否正確。`);
   }
 
-  const tradingDate = yahooData.date;
+  const tradingDate = stockPriceData.date;
 
   // 2. Parallel fetches (Initial inst fetch or wait? Let's keep parallel but handle inst delay)
   // Actually, breadths (Gemini) might also need date adjustment if it's too early.
   const results = await Promise.allSettled([
-    fetchInstitutionalWithFallback(symbol, tradingDate, yahooData.suffix),
+    fetchInstitutionalWithFallback(symbol, tradingDate, stockPriceData.suffix),
     fetchFinMindMargin(symbol, tradingDate),
     fetchMarketIndices(),
     withTimeout(fetchMarketBreadthViaGemini(tradingDate), 15000, {
@@ -449,7 +547,7 @@ export async function fetchAllStockData(symbol: string): Promise<StockData> {
     })
   ]);
 
-  const instResult = results[0].status === 'fulfilled' ? results[0].value : { foreign: 0, trust: 0, dealer: 0, total: 0, actualDate: tradingDate };
+  const instResult = results[0].status === 'fulfilled' ? results[0].value : { foreign: 0, trust: 0, dealer: 0, total: 0, found: false, actualDate: tradingDate, noActivity: false };
   const margin = results[1].status === 'fulfilled' ? results[1].value : null;
   const indices = results[2].status === 'fulfilled' ? results[2].value : { taiex: { close: 0, change: 0, percent: 0 }, otc: { close: 0, change: 0, percent: 0 } };
   const breadths = results[3].status === 'fulfilled' ? results[3].value : { advance: 0, decline: 0, note: "資料獲取失敗" };
@@ -465,16 +563,16 @@ export async function fetchAllStockData(symbol: string): Promise<StockData> {
   const marginYest = margin ? safeNum(margin.MarginPurchaseYesterdayBalance) : marginBalance;
   const marginChange = marginBalance - marginYest;
 
-  const turnoverRatio = (yahooData.volume / (yahooData.avgVol5D || 1)) * 100;
+  const turnoverRatio = (stockPriceData.volume / (stockPriceData.avgVol5D || 1)) * 100;
 
   return {
     symbol,
     name: symbol, // Could fetch name from Yahoo result if needed
-    price: yahooData.close,
-    change: yahooData.change,
-    changePercent: yahooData.changePercent,
-    volume: yahooData.volume,
-    avgVolume5D: yahooData.avgVol5D,
+    price: stockPriceData.close,
+    change: stockPriceData.change,
+    changePercent: stockPriceData.changePercent,
+    volume: stockPriceData.volume,
+    avgVolume5D: stockPriceData.avgVol5D,
     turnoverRatio,
     institutions: {
       foreign,
@@ -494,7 +592,9 @@ export async function fetchAllStockData(symbol: string): Promise<StockData> {
     raw: {
       dateStr: tradingDate,
       institutionDate: instResult.actualDate,
-      latestPrice: { close: yahooData.close, spread: yahooData.change, Trading_Volume: yahooData.volume },
+      institutionDataFound: instResult.found,
+      institutionNoActivity: (instResult as any).noActivity || false,
+      latestPrice: { close: stockPriceData.close, spread: stockPriceData.change, Trading_Volume: stockPriceData.volume },
       marginData: margin ? [margin] : [],
       geminiNote: breadths.note,
       taiex: indices.taiex,
