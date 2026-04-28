@@ -103,7 +103,7 @@ async function fetchPriceFallback(symbol: string, suffix: string) {
   // Final effort: TWSE/TPEx daily all (Heavy but reliable)
   try {
     if (suffix === ".TW") {
-      const url = `/api/twse/exchangeReport/STOCK_DAY_ALL?response=json`;
+      const url = `/api/twse?path=/exchangeReport/STOCK_DAY_ALL&response=json`;
       const res = await fetch(url);
       const json = await res.json();
       if (json.data) {
@@ -135,7 +135,7 @@ async function fetchYahooPrice(symbol: string) {
   const suffixes = [".TW", ".TWO"];
   for (const suffix of suffixes) {
     try {
-      const url = `/api/yahoo/${symbol}${suffix}?interval=1d&range=1mo`;
+      const url = `/api/yahoo?symbol=${symbol}${suffix}&interval=1d&range=1mo`;
       const res = await fetch(url);
       if (!res.ok) {
         console.warn(`Yahoo Proxy Error (${res.status}) for ${symbol}${suffix}. Attempting fallback...`);
@@ -203,7 +203,7 @@ async function fetchYahooPrice(symbol: string) {
 async function fetchInstitutionalData(symbol: string, date: string, suffix: string) {
   try {
     if (suffix === ".TW") {
-      const url = `/api/twse/fund/T86?response=json&date=${date.replace(/-/g, '')}&selectType=ALLBUT0999`;
+      const url = `/api/twse?path=/rwd/zh/fund/T86&response=json&date=${date.replace(/-/g, '')}&selectType=ALLBUT0999`;
       const res = await fetch(url);
       const json = await res.json();
       if (json.data) {
@@ -225,7 +225,7 @@ async function fetchInstitutionalData(symbol: string, date: string, suffix: stri
     } else {
       // TPEx
       const rocDate = getROCDate(new Date(date));
-      const url = `/api/tpex/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=json&se=EW&t=D&d=${rocDate}`;
+      const url = `/api/tpex?path=/web/stock/3insti/daily_trade/3itrade_hedge_result.php&l=zh-tw&o=json&se=EW&t=D&d=${rocDate}`;
       const res = await fetch(url);
       const json = await res.json();
       if (json.aaData) {
@@ -280,7 +280,7 @@ async function fetchIndicesFallback() {
       const d = String(current.getUTCDate()).padStart(2, "0");
       const dateStr = `${y}${m}${d}`;
       
-      const res = await fetch(`/api/twse/exchangeReport/MI_INDEX?response=json&date=${dateStr}&type=MS`);
+      const res = await fetch(`/api/twse?path=/exchangeReport/MI_INDEX&response=json&date=${dateStr}&type=MS`);
       const json = await res.json();
       
       if (json.stat === "OK" && json.data7) {
@@ -318,7 +318,7 @@ async function fetchMarketIndices() {
   try {
     const yahooIndices = await withTimeout((async () => {
       // TAIEX
-      const resT = await fetch(`/api/yahoo/%5ETWII?interval=1d&range=5d`);
+      const resT = await fetch(`/api/yahoo?symbol=%5ETWII&interval=1d&range=5d`);
       let taiex = { close: 0, change: 0, percent: 0 };
       if (resT.ok) {
         const jsonT = await resT.json();
@@ -333,7 +333,7 @@ async function fetchMarketIndices() {
       }
 
       // OTC
-      const resO = await fetch(`/api/yahoo/%5ETWOII?interval=1d&range=5d`);
+      const resO = await fetch(`/api/yahoo?symbol=%5ETWOII&interval=1d&range=5d`);
       let otc = { close: 0, change: 0, percent: 0 };
       if (resO.ok) {
         const jsonO = await resO.json();

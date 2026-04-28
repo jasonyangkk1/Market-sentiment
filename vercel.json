@@ -1,0 +1,14 @@
+{
+  "functions": {
+    "api/*.ts": {
+      "memory": 1024,
+      "maxDuration": 30
+    }
+  },
+  "rewrites": [
+    { "source": "/api/yahoo", "destination": "/api/yahoo.ts" },
+    { "source": "/api/twse", "destination": "/api/twse.ts" },
+    { "source": "/api/tpex", "destination": "/api/tpex.ts" },
+    { "source": "/(.*)", "destination": "/" }
+  ]
+}
