@@ -37,24 +37,29 @@ async function startServer() {
     let lastError = null;
     for (const url of urls) {
       try {
-        console.log(`[PROXY] Fetching Yahoo: ${url}`);
+        const randomUA = userAgents[Math.floor(Math.random() * userAgents.length)];
+        console.log(`[PROXY] Attempting Yahoo: ${url}`);
+        
         const response = await axios({
           method: "get",
           url: url,
           headers: {
-            "User-Agent": userAgents[Math.floor(Math.random() * userAgents.length)],
-            "Accept": "application/json, text/plain, */*",
-            "Referer": "https://finance.yahoo.com/quote/AAPL",
-            "Origin": "https://finance.yahoo.com"
+            "User-Agent": randomUA,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Referer": "https://finance.yahoo.com/taiwan",
+            "Origin": "https://finance.yahoo.com",
+            "Cache-Control": "no-cache"
           },
-          timeout: 10000 
+          timeout: 8000 
         });
         return res.json(response.data);
       } catch (error: any) {
         lastError = error;
         console.warn(`[PROXY] Yahoo Attempt failed (${error.response?.status}): ${error.message}`);
         if (error.response?.status === 429) {
-          await new Promise(r => setTimeout(r, 500));
+          // If rate limited, try next URL but wait slightly
+          await new Promise(r => setTimeout(r, 300));
         }
       }
     }
@@ -64,6 +69,22 @@ async function startServer() {
       message: lastError?.message,
       detail: lastError?.response?.data
     });
+  });
+
+  // FinMind Proxy Route
+  app.get("/api/finmind", async (req, res) => {
+    const { dataset, data_id, start_date } = req.query;
+    const token = process.env.FINMIND_TOKEN || process.env.VITE_FINMIND_TOKEN || "";
+    const url = `https://api.finmindtrade.com/api/v4/data?dataset=${dataset}&data_id=${data_id}&start_date=${start_date || ''}&token=${token}`;
+
+    try {
+      console.log(`[PROXY] Fetching FinMind: ${url.replace(token, 'REDACTED')}`);
+      const response = await axios.get(url, { timeout: 10000 });
+      res.json(response.data);
+    } catch (error: any) {
+      console.error("[PROXY] FinMind Error:", error.message);
+      res.status(error.response?.status || 500).json({ error: error.message });
+    }
   });
 
   // TPEx Proxy Routes

@@ -90,7 +90,7 @@ async function fetchPriceFallback(symbol: string, suffix: string) {
           change: Number(last.spread),
           changePercent: (Number(last.spread) / (Number(last.close) - Number(last.spread))) * 100,
           volume: Number(last.Trading_Volume),
-          avgVol5D: Number(last.Trading_Volume), // Fallback to same
+          avgVol5D: Number(last.Trading_Volume), 
           date: last.date,
           suffix
         };
@@ -100,9 +100,10 @@ async function fetchPriceFallback(symbol: string, suffix: string) {
     }
   }
 
-  // Final effort: TWSE/TPEx daily all (Heavy but reliable)
+  // Reliable Daily Summary Fallback
   try {
     if (suffix === ".TW") {
+      // TWSE STOCK_DAY_ALL is the best daily fallback for listed stocks
       const url = `/api/twse?path=/exchangeReport/STOCK_DAY_ALL&response=json`;
       const res = await fetch(url);
       const json = await res.json();
@@ -112,21 +113,60 @@ async function fetchPriceFallback(symbol: string, suffix: string) {
           // TWSE STOCK_DAY_ALL: 0:Code, 1:Name, 2:Vol, 3:Turnover, 4:Open, 5:High, 6:Low, 7:Close, 8:Change, 9:Trans
           const close = safeNum(row[7]);
           const change = safeNum(row[8]);
+          // Convert YYYYMMDD to YYYY-MM-DD
+          let date = new Date().toISOString().split('T')[0];
+          if (json.date && json.date.length === 8) {
+            date = `${json.date.substring(0, 4)}-${json.date.substring(4, 6)}-${json.date.substring(6, 8)}`;
+          }
+
           return {
             symbol: `${symbol}${suffix}`,
             close,
             change,
             changePercent: (change / (close - change)) * 100,
-            volume: safeNum(row[2]),
-            avgVol5D: safeNum(row[2]),
-            date: json.date ? json.date.substring(0, 4) + "-" + json.date.substring(4, 6) + "-" + json.date.substring(6, 8) : new Date().toISOString().split('T')[0],
+            volume: safeNum(row[2]) / 1000, // To Lots
+            avgVol5D: safeNum(row[2]) / 1000,
+            date,
+            suffix
+          };
+        }
+      }
+    } else if (suffix === ".TWO") {
+      // TPEx Daily Quote
+      const url = `/api/tpex?path=/web/stock/aftertrading/otc_trading_summary/result.php&l=zh-tw&o=json`;
+      const res = await fetch(url);
+      const json = await res.json();
+      // TPEx results are grouped by category, but we can search in json.aaData
+      if (json.aaData) {
+        const row = json.aaData.find((r: any[]) => r[0] === symbol);
+        if (row) {
+          // TPEx: 0:Code, 1:Name, 2:Close, 3:Change, 4:Open, 5:High, 6:Low, 7:Vol(Lots), 8:Turnover, 9:Trans...
+          const close = safeNum(row[2]);
+          const change = safeNum(row[3]);
+          let date = new Date().toISOString().split('T')[0];
+          if (json.reportDate) {
+             // reportDate is often ROC date like "112/05/20"
+             const parts = json.reportDate.split('/');
+             if (parts.length === 3) {
+                date = `${Number(parts[0]) + 1911}-${parts[1]}-${parts[2]}`;
+             }
+          }
+
+          return {
+            symbol: `${symbol}${suffix}`,
+            close,
+            change,
+            changePercent: (change / (close - change)) * 100,
+            volume: safeNum(row[7]),
+            avgVol5D: safeNum(row[7]),
+            date,
             suffix
           };
         }
       }
     }
   } catch (e) {
-    console.warn(`Final Price Fallback failed for ${symbol}`, e);
+    console.warn(`Summary Price Fallback failed for ${symbol}`, e);
   }
   return null;
 }
@@ -247,13 +287,17 @@ async function fetchInstitutionalData(symbol: string, date: string, suffix: stri
 }
 
 async function fetchFinMindMargin(symbol: string, date: string) {
-  const token = localStorage.getItem("finmind_token") || (import.meta.env.VITE_FINMIND_TOKEN as string) || "";
-  if (!token) return null;
-  const url = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockMarginPurchaseShortSale&data_id=${symbol}&start_date=${date}&token=${token}`;
+  // FinMind data often lags. We fetch the last 5 days to ensure we get the latest available point.
+  const d = new Date(date);
+  d.setDate(d.getDate() - 5);
+  const startDate = d.toISOString().split('T')[0];
+
+  const url = `/api/finmind?dataset=TaiwanStockMarginPurchaseShortSale&data_id=${symbol}&start_date=${startDate}`;
   try {
     const res = await fetch(url);
     const json = await res.json();
     if (json.status === 200 && json.data?.length > 0) {
+      // Find the record closest to our target date (or simply the last one available)
       return json.data[json.data.length - 1];
     }
   } catch (e) {
@@ -394,7 +438,7 @@ export async function fetchAllStockData(symbol: string): Promise<StockData> {
 
   // 2. Parallel fetches (Initial inst fetch or wait? Let's keep parallel but handle inst delay)
   // Actually, breadths (Gemini) might also need date adjustment if it's too early.
-  const [instResult, margin, indices, breadths] = await Promise.all([
+  const results = await Promise.allSettled([
     fetchInstitutionalWithFallback(symbol, tradingDate, yahooData.suffix),
     fetchFinMindMargin(symbol, tradingDate),
     fetchMarketIndices(),
@@ -404,6 +448,11 @@ export async function fetchAllStockData(symbol: string): Promise<StockData> {
       note: "搜尋超時"
     })
   ]);
+
+  const instResult = results[0].status === 'fulfilled' ? results[0].value : { foreign: 0, trust: 0, dealer: 0, total: 0, actualDate: tradingDate };
+  const margin = results[1].status === 'fulfilled' ? results[1].value : null;
+  const indices = results[2].status === 'fulfilled' ? results[2].value : { taiex: { close: 0, change: 0, percent: 0 }, otc: { close: 0, change: 0, percent: 0 } };
+  const breadths = results[3].status === 'fulfilled' ? results[3].value : { advance: 0, decline: 0, note: "資料獲取失敗" };
 
   console.log("[DEBUG] Institutional Data:", instResult);
 

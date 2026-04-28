@@ -6,9 +6,7 @@
     }
   },
   "rewrites": [
-    { "source": "/api/yahoo", "destination": "/api/yahoo.ts" },
-    { "source": "/api/twse", "destination": "/api/twse.ts" },
-    { "source": "/api/tpex", "destination": "/api/tpex.ts" },
-    { "source": "/(.*)", "destination": "/" }
+    { "source": "/api/(.*)", "destination": "/api/$1" },
+    { "source": "/((?!api).*)", "destination": "/index.html" }
   ]
 }
