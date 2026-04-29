@@ -113,9 +113,11 @@ async function startServer() {
     }
 
     const query = Object.entries(params as any)
-      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v)).replace(/%2F/g, '/')}`)
-      .join('&');
-    const url = `https://www.tpex.org.tw${tpexPath}?${query}`;
+      .map(([k, v]) => `${encodeURIComponent(k)}=${String(v)}`)
+      .join('&')
+      .replace(/%2F/g, '/');
+    const tpexPathStr = String(tpexPath);
+    const url = `https://www.tpex.org.tw${tpexPathStr.startsWith('/') ? '' : '/'}${tpexPathStr}?${query}`;
 
     try {
       console.log(`[PROXY] Fetching TPEx: ${url}`);
@@ -123,15 +125,16 @@ async function startServer() {
         method: "get",
         url: url,
         headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-          "Referer": "https://www.tpex.org.tw/",
-          "Accept": "application/json, text/javascript, */*; q=0.01"
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+          "Referer": "https://www.tpex.org.tw/zh-tw/web/stock/3insti/daily_trade/3itrade_hedge.php",
+          "Accept": "application/json, text/javascript, */*; q=0.01",
+          "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7"
         },
-        timeout: 10000 
+        timeout: 15000 
       });
       res.json(response.data);
     } catch (error: any) {
-      console.error("[PROXY] TPEx Error:", error.message);
+      console.error(`[PROXY] TPEx Error on ${url}:`, error.message);
       res.status(error.response?.status || 500).json({ error: error.message });
     }
   });
