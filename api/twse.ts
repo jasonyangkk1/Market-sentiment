@@ -7,7 +7,9 @@ export default async function handler(req: any, res: any) {
     return res.status(400).json({ error: 'Path is required' });
   }
 
-  const query = new URLSearchParams(params as any).toString();
+  const query = Object.entries(params)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v)).replace(/%2F/g, '/')}`)
+    .join('&');
   const url = `https://www.twse.com.tw${path}?${query}`;
 
   try {

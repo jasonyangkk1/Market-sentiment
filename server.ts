@@ -112,7 +112,9 @@ async function startServer() {
       return res.status(400).json({ error: 'Path is required' });
     }
 
-    const query = new URLSearchParams(params as any).toString();
+    const query = Object.entries(params as any)
+      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v)).replace(/%2F/g, '/')}`)
+      .join('&');
     const url = `https://www.tpex.org.tw${tpexPath}?${query}`;
 
     try {
@@ -142,7 +144,9 @@ async function startServer() {
       return res.status(400).json({ error: 'Path is required' });
     }
 
-    const query = new URLSearchParams(params as any).toString();
+    const query = Object.entries(params as any)
+      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v)).replace(/%2F/g, '/')}`)
+      .join('&');
     const url = `https://www.twse.com.tw${twsePath}?${query}`;
 
     try {

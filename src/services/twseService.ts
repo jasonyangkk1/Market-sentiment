@@ -171,10 +171,7 @@ async function fetchPriceFallback(symbol: string, suffix: string) {
   return null;
 }
 
-const clean = (s: string) => String(s || "").trim().replace(/\s/g, '');
-
 async function fetchStockPrice(symbol: string) {
-  const cleanSymbol = clean(symbol);
   // Check Cache first
   const cacheKey = `price_${symbol}`;
   const cached = sessionStorage.getItem(cacheKey);
@@ -197,11 +194,12 @@ async function fetchStockPrice(symbol: string) {
     const twseJson = await twseRes.json();
     
     if (twseJson.data) {
-      const row = twseJson.data.find((r: any[]) => clean(r[0]) === cleanSymbol);
+      const row = twseJson.data.find((r: any[]) => r[0].trim() === symbol);
       if (row) {
-        // ... (rest of TWSE logic remains the same)
+        // TWSE STOCK_DAY_ALL: 0:Code, 1:Name, 2:Vol, 3:Turnover, 4:Open, 5:High, 6:Low, 7:Close, 8:Change, 9:Trans
         const close = safeNum(row[7]);
         const changeStr = String(row[8] || "0");
+        // Handle ▲/▼/+/ /
         let change = safeNum(changeStr.replace(/[▲▼+]/g, ''));
         if (changeStr.includes("▼") || changeStr.includes("-")) {
           change = -change;
@@ -213,6 +211,7 @@ async function fetchStockPrice(symbol: string) {
           date = `${twseJson.date.substring(0, 4)}-${twseJson.date.substring(4, 6)}-${twseJson.date.substring(6, 8)}`;
         }
 
+        // Fetch 5D Avg Volume for listed
         let avgVol5D = volume;
         try {
           const histUrl = `/api/twse?path=/exchangeReport/STOCK_DAY&response=json&date=${date.replace(/-/g,'')}&stockNo=${symbol}`;
@@ -231,25 +230,27 @@ async function fetchStockPrice(symbol: string) {
           symbol: `${symbol}.TW`,
           close,
           change,
-          changePercent: (change / (close - change || 1)) * 100,
+          changePercent: (change / (close - change)) * 100,
           volume,
           avgVol5D,
           date,
           suffix: ".TW"
         };
+        console.log(`[Price] ${symbol} identified as ${data.suffix} (TWSE STOCK_DAY_ALL)`);
         sessionStorage.setItem(cacheKey, JSON.stringify({ data, expiry: Date.now() + 300000 }));
         return data;
       }
     }
 
     // 2. Try TPEx (OTC)
-    const tpexAllUrl = `/api/tpex?path=/web/stock/aftertrading/otc_trading_summary/result.php&l=zh-tw&o=json&se=AL`;
+    const tpexAllUrl = `/api/tpex?path=/web/stock/aftertrading/otc_trading_summary/result.php&l=zh-tw&o=json`;
     const tpexRes = await fetch(tpexAllUrl);
     const tpexJson = await tpexRes.json();
     
     if (tpexJson.aaData) {
-      const row = tpexJson.aaData.find((r: any[]) => clean(r[0]) === cleanSymbol);
+      const row = tpexJson.aaData.find((r: any[]) => r[0].trim() === symbol);
       if (row) {
+        // TPEx: 0:Code, 1:Name, 2:Close, 3:Change, 4:Open, 5:High, 6:Low, 7:Vol(Lots), 8:Turnover, 9:Trans...
         const close = safeNum(row[2]);
         const change = safeNum(row[3]);
         const volume = safeNum(row[7]);
@@ -262,6 +263,7 @@ async function fetchStockPrice(symbol: string) {
            }
         }
 
+        // Fetch 5D Avg Volume for OTC
         let avgVol5D = volume;
         try {
           const histUrl = `/api/tpex?path=/web/stock/aftertrading/daily_trading_info/stk_quote_result.php&l=zh-tw&o=json&stkno=${symbol}`;
@@ -269,6 +271,7 @@ async function fetchStockPrice(symbol: string) {
           const histJson = await histRes.json();
           if (histJson.aaData && histJson.aaData.length > 0) {
             const last5 = histJson.aaData.slice(-5);
+            // TPEx individual: 1:Volume(1000 shares)
             const sum = last5.reduce((acc: number, r: any[]) => acc + safeNum(r[1]), 0);
             avgVol5D = sum / last5.length;
           }
@@ -280,12 +283,13 @@ async function fetchStockPrice(symbol: string) {
           symbol: `${symbol}.TWO`,
           close,
           change,
-          changePercent: (change / (close - change || 1)) * 100,
+          changePercent: (change / (close - change)) * 100,
           volume,
           avgVol5D,
           date,
           suffix: ".TWO"
         };
+        console.log(`[Price] ${symbol} identified as ${data.suffix} (TPEx otc_summary)`);
         sessionStorage.setItem(cacheKey, JSON.stringify({ data, expiry: Date.now() + 300000 }));
         return data;
       }
@@ -294,88 +298,179 @@ async function fetchStockPrice(symbol: string) {
     console.error(`fetchStockPrice error for ${symbol}`, e);
   }
 
+  // Final fallback (Original logic)
   return await fetchPriceFallback(symbol, "");
 }
 
+async function fetchFinMindInstitutional(symbol: string, date: string): Promise<{ foreign: number, trust: number, dealer: number, total: number, found: boolean } | null> {
+  const url = `/api/finmind?dataset=TaiwanStockInstitutionalInvestorsBuySell&data_id=${symbol}&start_date=${date}`;
+  try {
+    const res = await fetch(url);
+    const json = await res.json();
+    if (json.status === 200 && json.data?.length > 0) {
+      // FinMind might return multiple rows for the same day (one per investor type)
+      const dayData = json.data.filter((r: any) => r.date === date);
+      if (dayData.length === 0) return null;
+
+      let f = 0, t = 0, d = 0;
+      dayData.forEach((r: any) => {
+        const net = safeNum(r.buy) - safeNum(r.sell);
+        if (r.name.includes('Foreign')) f += net;
+        else if (r.name.includes('Trust')) t += net;
+        else if (r.name.includes('Dealer')) d += net;
+      });
+
+      return {
+        foreign: Math.round(f / 1000),
+        trust: Math.round(t / 1000),
+        dealer: Math.round(d / 1000),
+        total: Math.round((f + t + d) / 1000),
+        found: true
+      };
+    }
+  } catch (e) {
+    console.warn("FinMind Institutional fetch failed", e);
+  }
+  return null;
+}
+
 async function fetchInstitutionalData(symbol: string, date: string, suffix: string): Promise<{ foreign: number, trust: number, dealer: number, total: number, found: boolean, reason?: 'notInList' | 'apiError', noActivity?: boolean }> {
+  const clean = (s: string) => String(s || "").replace(/\s/g, '');
   const cleanSymbol = clean(symbol);
 
   const performFetch = async (targetSuffix: string) => {
     try {
-      if (targetSuffix === ".TW") {
-        const types = ["ALLBUT0999", "0099P", "0015", "0049"];
-        let foundAnyList = false;
-        for (const type of types) {
-          const url = `/api/twse?path=/rwd/zh/fund/T86&response=json&date=${date.replace(/-/g, '')}&selectType=${type}`;
+      // 1. Try TWSE T86 (Covers many stocks, including some OTC)
+      const isLikelyETF = symbol.startsWith('00') || symbol.length > 4;
+      const t86Types = isLikelyETF 
+        ? ["0099P", "ALLBUT0999", "0015", "0049"] 
+        : ["ALLBUT0999", "0099P", "0015", "0049"];
+      
+      for (const type of t86Types) {
+        const url = `/api/twse?path=/rwd/zh/fund/T86&response=json&date=${date.replace(/-/g, '')}&selectType=${type}`;
+        const res = await fetch(url);
+        const json = await res.json();
+        
+        if (json.stat === "OK" && json.data) {
+          const row = json.data.find((r: any[]) => clean(r[0]) === cleanSymbol);
+          if (row) {
+            console.log(`[Inst] Found ${symbol} in TWSE T86 (${type})`);
+            const f = safeNum(row[4]);
+            const t = safeNum(row[10]);
+            const d = safeNum(row[11]);
+            const total = safeNum(row[16]);
+            return {
+              foreign: Math.round(f / 1000),
+              trust: Math.round(t / 1000),
+              dealer: Math.round(d / 1000),
+              total: Math.round(total / 1000),
+              found: true,
+              noActivity: false
+            };
+          }
+        }
+      }
+
+      // 2. If OTC stock, try TWSE TWT38U (OTC Institutional)
+      if (targetSuffix === ".TWO") {
+        const twtTypes = ["", "EW", "ES"]; // "" for all, EW for general, ES for innovation
+        for (const type of twtTypes) {
+           const qs = type ? `&selectType=${type}` : "";
+           const url = `/api/twse?path=/rwd/zh/fund/TWT38U&response=json&date=${date.replace(/-/g, '')}${qs}`;
+           const res = await fetch(url);
+           const json = await res.json();
+          
+           console.log(`[Inst] TWSE TWT38U selectType="${type}" stat=${json.stat} rows=${json.data?.length ?? 'N/A'}`);
+          
+           if (json.stat === "OK" && json.data && json.data.length > 0) {
+             console.log('[TWT38U Field Check]', json.data[0]);
+             const row = json.data.find((r: any[]) => clean(r[0]) === cleanSymbol);
+             if (row) {
+               console.log(`[Inst] Found ${symbol} in TWSE TWT38U (${type})`);
+               // Guess indexes based on T86 style but log them
+               // Usually: 0:Code, 1:Name, 2:ForeignBuy, 3:ForeignSell, 4:ForeignNet...
+               // For TWT38U (OTC summary daily), indexes might be different. 
+               // Based on standard TWSE OTC summary: 4:ForeignNet, 10:TrustNet, 11:DealerNet
+               const f = safeNum(row[4]);
+               const t = safeNum(row[10]);
+               const d = safeNum(row[11]);
+               // The total field index can vary, so sum them manually if unsure
+               const total = f + t + d;
+               return {
+                 foreign: Math.round(f / 1000),
+                 trust: Math.round(t / 1000),
+                 dealer: Math.round(d / 1000),
+                 total: Math.round(total / 1000),
+                 found: true,
+                 noActivity: false
+               };
+             }
+           }
+        }
+      }
+
+      // 3. Fallback to TPEx Scraper (3itrade)
+      if (targetSuffix === ".TWO") {
+        const rocDate = getROCDate(new Date(date));
+        const seTypes = ["EW", "ES", ""];
+        for (const se of seTypes) {
+          const url = `/api/tpex?path=/web/stock/3insti/daily_trade/3itrade_hedge_result.php&l=zh-tw&o=json&se=${se}&t=D&d=${rocDate}`;
           const res = await fetch(url);
           const json = await res.json();
           
-          if (json.stat === "OK" && json.data && json.data.length > 0) {
-            foundAnyList = true;
-            const row = json.data.find((r: any[]) => clean(r[0]) === cleanSymbol);
+          if (json.aaData && json.aaData.length > 0) {
+            console.log('[TPEx Field Check]', json.aaData[0]);
+            const row = json.aaData.find((r: any[]) => clean(r[0]) === cleanSymbol);
             if (row) {
-              return {
-                foreign: Math.round(safeNum(row[4]) / 1000),
-                trust: Math.round(safeNum(row[10]) / 1000),
-                dealer: Math.round(safeNum(row[11]) / 1000),
-                total: Math.round(safeNum(row[16]) / 1000),
-                found: true,
-                noActivity: false
+              const f = safeNum(row[4]);
+              const t = safeNum(row[7]);
+              const d = safeNum(row[10]);
+              const total = safeNum(row[11]);
+              return { 
+                foreign: Math.round(f / 1000), 
+                trust: Math.round(t / 1000), 
+                dealer: Math.round(d / 1000), 
+                total: Math.round(total / 1000), 
+                found: true, 
+                noActivity: false 
               };
             }
           }
         }
-        if (foundAnyList) return { foreign: 0, trust: 0, dealer: 0, total: 0, found: true, noActivity: true, reason: 'notInList' as const };
-      } else {
-        // TPEx - Use individual stock institutional report for better reliability
-        const rocDate = getROCDate(new Date(date));
-        const url = `/api/tpex?path=/web/stock/3insti/daily_trade/3itrade_result.php&l=zh-tw&o=json&stkno=${symbol}&d=${rocDate}`;
-        const res = await fetch(url);
-        const json = await res.json();
-        
-        // Single stock report structure differs: json.aaData is usually 1 row OR empty
-        if (json.aaData && json.aaData.length > 0) {
-          const row = json.aaData[0]; 
-          // 3itrade_result.php fields: 0:Date, 1:Symbol, 2:Name, 3:ForeignBuy, 4:ForeignSell, 5:ForeignNet, 6:TrustBuy, 7:TrustSell, 8:TrustNet, 9:DealerBuy, 10:DealerSell, 11:DealerNet, 12:TotalNet
-          return {
-            foreign: safeNum(row[5]),
-            trust: safeNum(row[8]),
-            dealer: safeNum(row[11]),
-            total: safeNum(row[12]),
-            found: true,
-            noActivity: false
-          };
-        }
-        
-        // If empty aaData, it usually means no activity for this stock on this date
-        // But we should verify if the T86 market-wide list is actually available to confirm "no activity" vs "API error"
-        // For simplicity, if we got a valid JSON but no rows for this specific stokno, we treat as no activity.
-        return { foreign: 0, trust: 0, dealer: 0, total: 0, found: true, noActivity: true, reason: 'notInList' as const };
       }
+      
+      return { foreign: 0, trust: 0, dealer: 0, total: 0, found: true, noActivity: true, reason: 'notInList' as const };
     } catch (e) {
       console.warn(`[Inst] ${targetSuffix} fetch failed for ${symbol}`, e);
       return { foreign: 0, trust: 0, dealer: 0, total: 0, found: false, reason: 'apiError' as const };
     }
-    return null;
   };
 
-  // 1. Try primary market
+  // 1. Primary Attempt
   let result = await performFetch(suffix);
-  // If definitely found WITH data, return.
   if (result && result.found && !result.noActivity) return result;
+  if (result && result.reason === ('apiError' as const)) return result;
 
-  // 2. Cross-verify with the other market (just in case of misidentification or dual listing/weirdness)
+  // 2. Cross-market retry
   const otherSuffix = suffix === ".TW" ? ".TWO" : ".TW";
+  console.log(`[Inst] ${symbol} Primary ${suffix} not found/no-activity, trying ${otherSuffix}`);
   const otherResult = await performFetch(otherSuffix);
   
   if (otherResult && otherResult.found && !otherResult.noActivity) return otherResult;
+  if (otherResult && otherResult.reason === ('apiError' as const)) return otherResult;
 
-  // 3. Fallback: If either market confirmed "notInList", we trust it's no activity
-  if (result?.reason === 'notInList' || otherResult?.reason === 'notInList') {
+  // 3. Ultimate Fallback: FinMind (Try even if scraper said "noActivity")
+  console.log(`[Inst] ${symbol} Scrapers failed or said no activity, trying FinMind...`);
+  const finmindResult = await fetchFinMindInstitutional(symbol, date);
+  if (finmindResult && finmindResult.found) {
+    return { ...finmindResult, noActivity: false };
+  }
+
+  // 4. Final conclusion if both scrapers said "notInList"
+  if (result?.noActivity || otherResult?.noActivity) {
     return { foreign: 0, trust: 0, dealer: 0, total: 0, found: true, noActivity: true, reason: 'notInList' as const };
   }
 
-  // 4. If everything failed (API errors or no lists at all), return apiError
   return { foreign: 0, trust: 0, dealer: 0, total: 0, found: false, reason: 'apiError' as const };
 }
 
@@ -510,7 +605,7 @@ async function fetchInstitutionalWithFallback(symbol: string, initialDate: strin
     const data = await fetchInstitutionalData(symbol, currentDateStr, suffix);
     
     if (data.found) {
-      return { ...data, actualDate: currentDateStr, noActivity: false };
+      return { ...data, actualDate: currentDateStr };
     }
 
     if (data.reason === 'notInList') {
