@@ -1,5 +1,23 @@
 import { AnalysisResult, fetchMarketBreadthViaGemini } from "./geminiService";
 
+// [HOLIDAY FIX] Taiwan Public Holidays 2024-2026
+const TW_HOLIDAYS = new Set([
+  // 2024
+  "2024-01-01", "2024-02-08", "2024-02-09", "2024-02-12", "2024-02-13", "2024-02-14", "2024-02-28",
+  "2024-04-04", "2024-04-05", "2024-05-01", "2024-06-10", "2024-09-17", "2024-10-10",
+  // 2025
+  "2025-01-01", "2025-01-27", "2025-01-28", "2025-01-29", "2025-01-30", "2025-01-31", "2025-02-28",
+  "2025-04-03", "2025-04-04", "2025-05-01", "2025-06-02", "2025-10-06", "2025-10-10",
+  // 2026
+  "2026-01-01", "2026-02-16", "2026-02-17", "2026-02-18", "2026-02-19", "2026-02-20", "2026-02-21",
+  "2026-02-28", "2026-04-02", "2026-04-03", "2026-05-01", "2026-06-19", "2026-09-25", "2026-10-10",
+]);
+
+// [HOLIDAY FIX]
+function isTWHoliday(dateStr: string): boolean {
+  return TW_HOLIDAYS.has(dateStr);
+}
+
 export interface StockData {
   symbol: string;
   name: string;
@@ -51,25 +69,30 @@ function getROCDate(date: Date): string {
 
 function getLatestTradingDate(date: Date): string {
   const twTime = date.getTime() + 8 * 3600 * 1000;
-  const twDate = new Date(twTime);
-  const day = twDate.getUTCDay();
+  let current = new Date(twTime);
   
-  let offset = 0;
-  if (day === 0) offset = 2; // Sunday -> Friday
-  else if (day === 6) offset = 1; // Saturday -> Friday
-  
-  const adjusted = new Date(twTime - offset * 86400000);
-  return adjusted.toISOString().split('T')[0];
+  // [HOLIDAY FIX]
+  for (let i = 0; i < 7; i++) {
+    const dStr = current.toISOString().split('T')[0];
+    const day = current.getUTCDay(); // 0: Sunday, 6: Saturday
+    if (day !== 0 && day !== 6 && !isTWHoliday(dStr)) {
+      return dStr;
+    }
+    current.setTime(current.getTime() - 86400000);
+  }
+  return current.toISOString().split('T')[0];
 }
 
 function getPrevTradingDay(dateStr: string): string {
   const d = new Date(dateStr);
   d.setUTCDate(d.getUTCDate() - 1);
-  // Skip Sunday (0) and Saturday (6)
-  while (d.getUTCDay() === 0 || d.getUTCDay() === 6) {
+  let dStr = d.toISOString().split('T')[0];
+  // [HOLIDAY FIX] skip weekends and holidays
+  while (d.getUTCDay() === 0 || d.getUTCDay() === 6 || isTWHoliday(dStr)) {
     d.setUTCDate(d.getUTCDate() - 1);
+    dStr = d.toISOString().split('T')[0];
   }
-  return d.toISOString().split('T')[0];
+  return dStr;
 }
 
 async function fetchPriceFallback(symbol: string, suffix: string) {
@@ -132,37 +155,70 @@ async function fetchPriceFallback(symbol: string, suffix: string) {
         }
       }
     } else if (suffix === ".TWO") {
-      // TPEx Daily Quote
-      const url = `/api/tpex?path=/web/stock/aftertrading/otc_trading_summary/result.php&l=zh-tw&o=json`;
-      const res = await fetch(url);
-      const json = await res.json();
-      // TPEx results are grouped by category, but we can search in json.aaData
-      if (json.aaData) {
-        const row = json.aaData.find((r: any[]) => r[0] === symbol);
-        if (row) {
-          // TPEx: 0:Code, 1:Name, 2:Close, 3:Change, 4:Open, 5:High, 6:Low, 7:Vol(Lots), 8:Turnover, 9:Trans...
-          const close = safeNum(row[2]);
-          const change = safeNum(row[3]);
+      // [HOLIDAY FIX v2] TPEx Daily Quote - Try summary first, then individual history fallback
+      try {
+        const url = `/api/tpex?path=/web/stock/aftertrading/otc_trading_summary/result.php&l=zh-tw&o=json`;
+        const res = await fetch(url);
+        const json = await res.json();
+        if (json.aaData) {
+          const row = json.aaData.find((r: any[]) => r[0] === symbol);
+          if (row) {
+            const close = safeNum(row[2]);
+            const change = safeNum(row[3]);
+            let date = new Date().toISOString().split('T')[0];
+            if (json.reportDate) {
+               const parts = json.reportDate.split('/');
+               if (parts.length === 3) {
+                  date = `${Number(parts[0]) + 1911}-${parts[1]}-${parts[2]}`;
+               }
+            }
+            return {
+              symbol: `${symbol}${suffix}`,
+              close,
+              change,
+              changePercent: (change / (close - change)) * 100,
+              volume: safeNum(row[7]),
+              avgVol5D: safeNum(row[7]),
+              date,
+              suffix
+            };
+          }
+        }
+      } catch (e) {
+        console.warn("TPEx summary fallback failed, trying individual result...");
+      }
+
+      // [HOLIDAY FIX v2] Try individual history API as second fallback for TWO
+      try {
+        const url = `/api/tpex?path=/web/stock/aftertrading/daily_trading_info/stk_quote_result.php&l=zh-tw&o=json&stkno=${symbol}`;
+        const res = await fetch(url);
+        const json = await res.json();
+        if (json.aaData && json.aaData.length > 0) {
+          const last = json.aaData[json.aaData.length - 1]; // Latest record
+          // index 2: Close, index 1: Volume(1000 shares), index 0: Date(ROC)
+          const close = safeNum(last[2]);
+          const prevClose = json.aaData.length > 1 ? safeNum(json.aaData[json.aaData.length - 2][2]) : close;
+          const change = close - prevClose;
+          
           let date = new Date().toISOString().split('T')[0];
-          if (json.reportDate) {
-             // reportDate is often ROC date like "112/05/20"
-             const parts = json.reportDate.split('/');
-             if (parts.length === 3) {
-                date = `${Number(parts[0]) + 1911}-${parts[1]}-${parts[2]}`;
-             }
+          const parts = String(last[0]).split('/');
+          if (parts.length === 3) {
+            date = `${Number(parts[0]) + 1911}-${parts[1]}-${parts[2]}`;
           }
 
           return {
             symbol: `${symbol}${suffix}`,
             close,
             change,
-            changePercent: (change / (close - change)) * 100,
-            volume: safeNum(row[7]),
-            avgVol5D: safeNum(row[7]),
+            changePercent: prevClose !== 0 ? (change / prevClose) * 100 : 0,
+            volume: safeNum(last[1]), 
+            avgVol5D: safeNum(last[1]),
             date,
             suffix
           };
         }
+      } catch (e) {
+        console.warn(`TPEx individual fallback failed for ${symbol}`, e);
       }
     }
   } catch (e) {
@@ -243,56 +299,104 @@ async function fetchStockPrice(symbol: string) {
     }
 
     // 2. Try TPEx (OTC)
+    // [HOLIDAY FIX v2] Try latest summary first (without d=)
     const tpexAllUrl = `/api/tpex?path=/web/stock/aftertrading/otc_trading_summary/result.php&l=zh-tw&o=json`;
     const tpexRes = await fetch(tpexAllUrl);
     const tpexJson = await tpexRes.json();
     
-    if (tpexJson.aaData) {
-      const row = tpexJson.aaData.find((r: any[]) => r[0].trim() === symbol);
-      if (row) {
-        // TPEx: 0:Code, 1:Name, 2:Close, 3:Change, 4:Open, 5:High, 6:Low, 7:Vol(Lots), 8:Turnover, 9:Trans...
-        const close = safeNum(row[2]);
-        const change = safeNum(row[3]);
-        const volume = safeNum(row[7]);
-        
-        let date = new Date().toISOString().split('T')[0];
-        if (tpexJson.reportDate) {
-           const parts = tpexJson.reportDate.split('/');
+    let tpexTargetRow = null;
+    if (tpexJson.aaData && tpexJson.aaData.length > 0) {
+       tpexTargetRow = tpexJson.aaData.find((r: any[]) => r[0].trim() === symbol);
+    }
+
+    // [HOLIDAY FIX v2] If summary empty (holiday) or stock not found, try individual stk_quote_result
+    if (!tpexTargetRow) {
+      try {
+        const histUrl = `/api/tpex?path=/web/stock/aftertrading/daily_trading_info/stk_quote_result.php&l=zh-tw&o=json&stkno=${symbol}`;
+        const histRes = await fetch(histUrl);
+        const histJson = await histRes.json();
+        if (histJson.aaData && histJson.aaData.length > 0) {
+           const last = histJson.aaData[histJson.aaData.length - 1];
+           const prevClose = histJson.aaData.length > 1 ? safeNum(histJson.aaData[histJson.aaData.length - 2][2]) : safeNum(last[2]);
+           const close = safeNum(last[2]);
+           const change = close - prevClose;
+           const volume = safeNum(last[1]);
+
+           let date = new Date().toISOString().split('T')[0];
+           const parts = String(last[0]).split('/');
            if (parts.length === 3) {
-              date = `${Number(parts[0]) + 1911}-${parts[1]}-${parts[2]}`;
+             date = `${Number(parts[0]) + 1911}-${parts[1]}-${parts[2]}`;
            }
-        }
 
-        // Fetch 5D Avg Volume for OTC
-        let avgVol5D = volume;
-        try {
-          const histUrl = `/api/tpex?path=/web/stock/aftertrading/daily_trading_info/stk_quote_result.php&l=zh-tw&o=json&stkno=${symbol}`;
-          const histRes = await fetch(histUrl);
-          const histJson = await histRes.json();
-          if (histJson.aaData && histJson.aaData.length > 0) {
-            const last5 = histJson.aaData.slice(-5);
-            // TPEx individual: 1:Volume(1000 shares)
-            const sum = last5.reduce((acc: number, r: any[]) => acc + safeNum(r[1]), 0);
-            avgVol5D = sum / last5.length;
-          }
-        } catch (e) {
-          console.warn(`Failed to fetch historical volume for ${symbol} (OTC)`, e);
-        }
+           const data = {
+             symbol: `${symbol}.TWO`,
+             close,
+             change,
+             changePercent: prevClose !== 0 ? (change / prevClose) * 100 : 0,
+             volume,
+             avgVol5D: volume, // Will refine below
+             date,
+             suffix: ".TWO"
+           };
 
-        const data = {
-          symbol: `${symbol}.TWO`,
-          close,
-          change,
-          changePercent: (change / (close - change)) * 100,
-          volume,
-          avgVol5D,
-          date,
-          suffix: ".TWO"
-        };
-        console.log(`[Price] ${symbol} identified as ${data.suffix} (TPEx otc_summary)`);
-        sessionStorage.setItem(cacheKey, JSON.stringify({ data, expiry: Date.now() + 300000 }));
-        return data;
+           // Refine 5D Avg Volume for OTC individual
+           const last5 = histJson.aaData.slice(-5);
+           const sum = last5.reduce((acc: number, r: any[]) => acc + safeNum(r[1]), 0);
+           data.avgVol5D = sum / last5.length;
+
+           console.log(`[Price] ${symbol} identified as ${data.suffix} (TPEx stk_quote history)`);
+           sessionStorage.setItem(cacheKey, JSON.stringify({ data, expiry: Date.now() + 300000 }));
+           return data;
+        }
+      } catch (e) {
+        console.warn(`TPEx individual fetch failed for ${symbol}`, e);
       }
+    }
+    
+    if (tpexTargetRow) {
+      const row = tpexTargetRow;
+      // TPEx: 0:Code, 1:Name, 2:Close, 3:Change, 4:Open, 5:High, 6:Low, 7:Vol(Lots), 8:Turnover, 9:Trans...
+      const close = safeNum(row[2]);
+      const change = safeNum(row[3]);
+      const volume = safeNum(row[7]);
+      
+      let date = new Date().toISOString().split('T')[0];
+      if (tpexJson.reportDate) {
+         const parts = tpexJson.reportDate.split('/');
+         if (parts.length === 3) {
+            date = `${Number(parts[0]) + 1911}-${parts[1]}-${parts[2]}`;
+         }
+      }
+
+      // Fetch 5D Avg Volume for OTC
+      let avgVol5D = volume;
+      try {
+        const histUrl = `/api/tpex?path=/web/stock/aftertrading/daily_trading_info/stk_quote_result.php&l=zh-tw&o=json&stkno=${symbol}`;
+        const histRes = await fetch(histUrl);
+        const histJson = await histRes.json();
+        if (histJson.aaData && histJson.aaData.length > 0) {
+          const last5 = histJson.aaData.slice(-5);
+          // TPEx individual: 1:Volume(1000 shares)
+          const sum = last5.reduce((acc: number, r: any[]) => acc + safeNum(r[1]), 0);
+          avgVol5D = sum / last5.length;
+        }
+      } catch (e) {
+        console.warn(`Failed to fetch historical volume for ${symbol} (OTC)`, e);
+      }
+
+      const data = {
+        symbol: `${symbol}.TWO`,
+        close,
+        change,
+        changePercent: (change / (close - change)) * 100,
+        volume,
+        avgVol5D,
+        date,
+        suffix: ".TWO"
+      };
+      console.log(`[Price] ${symbol} identified as ${data.suffix} (TPEx otc_summary)`);
+      sessionStorage.setItem(cacheKey, JSON.stringify({ data, expiry: Date.now() + 300000 }));
+      return data;
     }
   } catch (e) {
     console.error(`fetchStockPrice error for ${symbol}`, e);
@@ -335,7 +439,11 @@ async function fetchFinMindInstitutional(symbol: string, date: string): Promise<
 }
 
 async function fetchInstitutionalData(symbol: string, date: string, suffix: string): Promise<{ foreign: number, trust: number, dealer: number, total: number, found: boolean, reason?: 'notInList' | 'apiError', noActivity?: boolean }> {
+  // [HOLIDAY FIX v2] ensure date is a valid trading day
+  const safeDateStr = getLatestTradingDate(new Date(date + 'T00:00:00+08:00'));
+  
   const clean = (s: string) => String(s || "").replace(/\s/g, '');
+  const stripHtml = (s: string) => String(s || "").replace(/<[^>]+>/g, "").replace(/\s/g, ""); // [INST FIX v3]
   const cleanSymbol = clean(symbol);
 
   const performFetch = async (targetSuffix: string) => {
@@ -347,7 +455,7 @@ async function fetchInstitutionalData(symbol: string, date: string, suffix: stri
         : ["ALLBUT0999", "0099P", "0015", "0049"];
       
       for (const type of t86Types) {
-        const url = `/api/twse?path=/rwd/zh/fund/T86&response=json&date=${date.replace(/-/g, '')}&selectType=${type}`;
+        const url = `/api/twse?path=/rwd/zh/fund/T86&response=json&date=${safeDateStr.replace(/-/g, '')}&selectType=${type}`;
         const res = await fetch(url);
         const json = await res.json();
         
@@ -376,7 +484,7 @@ async function fetchInstitutionalData(symbol: string, date: string, suffix: stri
         const twtTypes = ["", "EW", "ES"]; // "" for all, EW for general, ES for innovation
         for (const type of twtTypes) {
            const qs = type ? `&selectType=${type}` : "";
-           const url = `/api/twse?path=/rwd/zh/fund/TWT38U&response=json&date=${date.replace(/-/g, '')}${qs}`;
+           const url = `/api/twse?path=/rwd/zh/fund/TWT38U&response=json&date=${safeDateStr.replace(/-/g, '')}${qs}`;
            const res = await fetch(url);
            const json = await res.json();
           
@@ -387,15 +495,10 @@ async function fetchInstitutionalData(symbol: string, date: string, suffix: stri
              const row = json.data.find((r: any[]) => clean(r[0]) === cleanSymbol);
              if (row) {
                console.log(`[Inst] Found ${symbol} in TWSE TWT38U (${type})`);
-               // Guess indexes based on T86 style but log them
-               // Usually: 0:Code, 1:Name, 2:ForeignBuy, 3:ForeignSell, 4:ForeignNet...
-               // For TWT38U (OTC summary daily), indexes might be different. 
-               // Based on standard TWSE OTC summary: 4:ForeignNet, 10:TrustNet, 11:DealerNet
                const f = safeNum(row[4]);
-               const t = safeNum(row[10]);
-               const d = safeNum(row[11]);
-               // The total field index can vary, so sum them manually if unsure
-               const total = f + t + d;
+               const t = safeNum(row[7]); // [INST FIX v3] was row[10]
+               const d = safeNum(row[10]); // [INST FIX v3] was row[11]
+               const total = safeNum(row[11]); // [INST FIX v3] was sum
                return {
                  foreign: Math.round(f / 1000),
                  trust: Math.round(t / 1000),
@@ -411,31 +514,44 @@ async function fetchInstitutionalData(symbol: string, date: string, suffix: stri
 
       // 3. Fallback to TPEx Scraper (3itrade)
       if (targetSuffix === ".TWO") {
-        const rocDate = getROCDate(new Date(date));
         const seTypes = ["EW", "ES", ""];
-        for (const se of seTypes) {
-          const url = `/api/tpex?path=/web/stock/3insti/daily_trade/3itrade_hedge_result.php&l=zh-tw&o=json&se=${se}&t=D&d=${rocDate}`;
-          const res = await fetch(url);
-          const json = await res.json();
-          
-          if (json.aaData && json.aaData.length > 0) {
-            console.log('[TPEx Field Check]', json.aaData[0]);
-            const row = json.aaData.find((r: any[]) => clean(r[0]) === cleanSymbol);
-            if (row) {
-              const f = safeNum(row[4]);
-              const t = safeNum(row[7]);
-              const d = safeNum(row[10]);
-              const total = safeNum(row[11]);
-              return { 
-                foreign: Math.round(f / 1000), 
-                trust: Math.round(t / 1000), 
-                dealer: Math.round(d / 1000), 
-                total: Math.round(total / 1000), 
-                found: true, 
-                noActivity: false 
-              };
+        let instDate = safeDateStr;
+        
+        // [HOLIDAY FIX] retry for holidays up to 3 times
+        for (let retry = 0; retry < 3; retry++) {
+          const rocDate = getROCDate(new Date(instDate));
+          let foundAnyInRetry = false;
+
+          for (const se of seTypes) {
+            const url = `/api/tpex?path=/web/stock/3insti/daily_trade/3itrade_hedge_result.php&l=zh-tw&o=json&se=${se}&t=D&d=${rocDate}`;
+            const res = await fetch(url);
+            const json = await res.json();
+            
+            if (json.aaData && json.aaData.length > 0) {
+              foundAnyInRetry = true;
+              console.log('[TPEx Field Check]', json.data ? json.data[0] : json.aaData[0]);
+              const row = json.aaData.find((r: any[]) => stripHtml(r[0]) === cleanSymbol); // [INST FIX v3] use stripHtml
+              if (row) {
+                const f = safeNum(row[4]);
+                const t = safeNum(row[7]);
+                const d = safeNum(row[10]);
+                const total = safeNum(row[11]);
+                return { 
+                  foreign: Math.round(f / 1000), 
+                  trust: Math.round(t / 1000), 
+                  dealer: Math.round(d / 1000), 
+                  total: Math.round(total / 1000), 
+                  found: true, 
+                  noActivity: false 
+                };
+              }
             }
           }
+
+          if (foundAnyInRetry) {
+             break;
+          }
+          instDate = getPrevTradingDay(instDate);
         }
       }
       
@@ -461,7 +577,7 @@ async function fetchInstitutionalData(symbol: string, date: string, suffix: stri
 
   // 3. Ultimate Fallback: FinMind (Try even if scraper said "noActivity")
   console.log(`[Inst] ${symbol} Scrapers failed or said no activity, trying FinMind...`);
-  const finmindResult = await fetchFinMindInstitutional(symbol, date);
+  const finmindResult = await fetchFinMindInstitutional(symbol, safeDateStr);
   if (finmindResult && finmindResult.found) {
     return { ...finmindResult, noActivity: false };
   }
@@ -608,7 +724,8 @@ async function fetchInstitutionalWithFallback(symbol: string, initialDate: strin
       return { ...data, actualDate: currentDateStr };
     }
 
-    if (data.reason === 'notInList') {
+    // [INST FIX v3] only stop early for listed stocks
+    if (data.reason === 'notInList' && suffix === '.TW') {
       // Confirmed no activity today, stop fallback and return zeros
       console.log(`[Inst] ${symbol} no activity on ${currentDateStr} (confirmed by empty search in T86 list)`);
       return { ...data, actualDate: currentDateStr, noActivity: true, found: true };
